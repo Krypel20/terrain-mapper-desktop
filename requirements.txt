@@ -1,0 +1,13 @@
+PyQt6
+pyvista
+pandas
+numpy
+fastapi
+uvicorn
+paho-mqtt
+psycopg2-binary
+sqlalchemy
+geoalchemy2
+paho-mqtt
+pyproj
+pyvistaqt
