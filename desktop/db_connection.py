@@ -4,7 +4,7 @@ from psycopg2 import sql
 import pandas as pd
 
 class DatabaseConnection:
-    def __init__(self, dbname, user='postgres', password=None, host='localhost', port=5432):
+    def __init__(self, dbname, user='postgres', password=None, host='localhost', port=5433):
         self.dbname = dbname
         self.user = user
         self.password = password
@@ -39,7 +39,7 @@ class DatabaseConnection:
     def get_session_data(self, session_name):
         conn = self.connect()
         cur = conn.cursor()
-        table_name = f"measurements_{session_name.lower().replace(' ', '_')}"
+        table_name = f"session_{session_name.lower().replace(' ', '_')}"
         query = sql.SQL("""
             SELECT measurement_time, 
                    ST_X(location::geometry) as longitude, 

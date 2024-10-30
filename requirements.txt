@@ -11,3 +11,4 @@ geoalchemy2
 paho-mqtt
 pyproj
 pyvistaqt
+psycopg2
