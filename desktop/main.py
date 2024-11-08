@@ -3,17 +3,28 @@ import pandas as pd
 import numpy as np
 import pyvista as pv
 from scipy.interpolate import griddata
-from scipy.spatial import KDTree  # Nowy import dla metody window
+from scipy.spatial import KDTree
 from pyproj import Transformer
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout, 
     QWidget, QComboBox, QLabel, QSpinBox, QDoubleSpinBox, QGroupBox,
-    QStatusBar, QToolBar, QMenuBar, QMenu, QStyle, QFrame, QFileDialog
+    QStatusBar, QToolBar, QMenuBar, QMenu, QStyle, QFrame, QFileDialog,
+    QListWidget, QListWidgetItem, QCheckBox
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QIcon
 from pyvistaqt import QtInteractor
 from db_connection import DatabaseConnection
+
+class SessionListWidget(QListWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        
+    def addSessionItem(self, session_name, measurements_count):
+        item = QListWidgetItem(f"{session_name} ({measurements_count} points)")
+        item.setData(Qt.ItemDataRole.UserRole, session_name)
+        self.addItem(item)
 
 class TerrainMapper(QMainWindow):
     def __init__(self):
@@ -29,6 +40,8 @@ class TerrainMapper(QMainWindow):
             host="localhost",
             port="5433"
         )
+        # słownik do przechowywania ładowanych danych sesji
+        self.session_data = {}
 
         # Stwórz pasek menu
         self.create_menu_bar()
@@ -113,25 +126,32 @@ class TerrainMapper(QMainWindow):
         control_widget = QWidget()
         control_layout = QVBoxLayout(control_widget)
         
-        # Grupa wyboru sesji
+        # Session selection group
         session_group = QGroupBox("Session Selection")
         session_layout = QVBoxLayout()
         
-        self.session_combo = QComboBox()
-        self.session_combo.currentIndexChanged.connect(self.load_session_data)
+        # Add session list widget
+        self.session_list = SessionListWidget()
+        self.session_list.itemSelectionChanged.connect(self.update_visualization_buttons)
         
+        # Add refresh button
         self.load_button = QPushButton("Refresh Sessions")
         self.load_button.clicked.connect(self.load_sessions)
         
-        session_layout.addWidget(self.session_combo)
+        session_layout.addWidget(self.session_list)
         session_layout.addWidget(self.load_button)
         session_group.setLayout(session_layout)
         
-        # Grupa parametrów wizualizacji
+        # Visualization parameters group
         visualization_group = QGroupBox("Visualization Parameters")
         visualization_layout = QVBoxLayout()
         
-        # Parametry wygładzania
+        # Add merge options
+        merge_label = QLabel("Merge Method:")
+        self.merge_method = QComboBox()
+        self.merge_method.addItems(['Simple', 'Average', 'Weighted'])
+        
+        # Add other parameters (smoothing, etc.)
         smoothing_label = QLabel("Smoothing:")
         self.smoothing_method = QComboBox()
         self.smoothing_method.addItems(['laplacian', 'gaussian', 'window'])
@@ -147,6 +167,8 @@ class TerrainMapper(QMainWindow):
         self.smoothing_factor.setSingleStep(0.1)
         self.smoothing_factor.setValue(0.5)
         
+        visualization_layout.addWidget(merge_label)
+        visualization_layout.addWidget(self.merge_method)
         visualization_layout.addWidget(smoothing_label)
         visualization_layout.addWidget(self.smoothing_method)
         visualization_layout.addWidget(iterations_label)
@@ -155,7 +177,7 @@ class TerrainMapper(QMainWindow):
         visualization_layout.addWidget(self.smoothing_factor)
         visualization_group.setLayout(visualization_layout)
         
-        # Przyciski wizualizacji
+        # Visualization buttons group
         buttons_group = QGroupBox("Visualization")
         buttons_layout = QVBoxLayout()
         
@@ -176,13 +198,13 @@ class TerrainMapper(QMainWindow):
         buttons_layout.addWidget(self.visualize_button_interpolation)
         buttons_group.setLayout(buttons_layout)
         
-        # Dodaj wszystkie grupy do głównego layoutu
+        # Add all groups to main layout
         control_layout.addWidget(session_group)
         control_layout.addWidget(visualization_group)
         control_layout.addWidget(buttons_group)
         control_layout.addStretch()
         
-        # Stylizacja
+        # Styling
         control_widget.setMaximumWidth(300)
         control_widget.setStyleSheet("""
             QGroupBox {
@@ -258,9 +280,21 @@ class TerrainMapper(QMainWindow):
             self.statusBar.showMessage("No model to export")
 
     def load_sessions(self):
-        self.session_combo.clear()
+        """Load sessions from database and populate the session list."""
+        self.session_list.clear()
+        self.session_data.clear()
+        
         sessions = self.db.get_sessions()
-        self.session_combo.addItems(sessions)
+        for session_name in sessions:
+            # Get the data for this session
+            df = self.db.get_session_data(session_name)
+            measurements_count = len(df) if df is not None else 0
+            
+            # Add to session list widget
+            self.session_list.addSessionItem(session_name, measurements_count)
+            
+            # Store the data
+            self.session_data[session_name] = df
 
     def load_session_data(self):
         session_name = self.session_combo.currentText()
@@ -315,168 +349,7 @@ class TerrainMapper(QMainWindow):
                         smoothed.points[i, 2] = np.average(points[neighbors, 2], weights=weights)
         
         return smoothed
-    
-    def visualize_terrain_interpolation(self):
-        if self.df is not None:
-            try:
-                # Pobierz parametry wygładzania z kontrolek
-                smoothing_method = self.smoothing_method.currentText()
-                iterations = self.smoothing_iterations.value()
-                relaxation_factor = self.smoothing_factor.value()
-                
-                print(f"Stosowanie parametrów wygładzania:")
-                print(f"Metoda: {smoothing_method}")
-                print(f"Liczba iteracji: {iterations}")
-                print(f"Współczynnik wygładzania: {relaxation_factor}")
-
-                # Konwersja współrzędnych
-                points = np.array([self.geo_to_metric(lat, lon, alt) for lat, lon, alt in 
-                                zip(self.df['Latitude'], self.df['Longitude'], self.df['Altitude'])])
-                
-                # Normalizacja punktów
-                points -= points.min(axis=0)
-                
-                # Tworzenie chmury punktów
-                point_cloud = pv.PolyData(points)
-                point_cloud['Altitude'] = points[:, 2]
-
-                # Tworzenie początkowej siatki
-                surf = point_cloud.delaunay_2d()
-                
-                # Wygładzanie powierzchni w zależności od wybranej metody
-                if smoothing_method == 'laplacian':
-                    smoothed = surf.smooth(
-                        n_iter=iterations,
-                        relaxation_factor=relaxation_factor,
-                        feature_angle=60,
-                        boundary_smoothing=True
-                    )
-                elif smoothing_method == 'gaussian':
-                    # Implementacja wygładzania gaussowskiego
-                    smoothed = surf.copy()
-                    points = smoothed.points
-                    sigma = relaxation_factor  # Używamy współczynnika jako sigma
-                    
-                    for _ in range(iterations):
-                        # Stwórz drzewo KD dla szybkiego wyszukiwania sąsiadów
-                        tree = KDTree(points[:, :2])
-                        new_points = points.copy()
-                        
-                        # Promień wyszukiwania (3 * sigma dla pokrycia 99.7% rozkładu Gaussa)
-                        radius = 3 * sigma
-                        
-                        for i in range(len(points)):
-                            # Znajdź sąsiadów w promieniu
-                            neighbors = tree.query_ball_point(points[i, :2], r=radius)
-                            if neighbors:
-                                # Oblicz wagi gaussowskie
-                                distances = np.sum((points[neighbors, :2] - points[i, :2])**2, axis=1)
-                                weights = np.exp(-distances / (2 * sigma**2))
-                                
-                                # Normalizuj wagi
-                                weights = weights / np.sum(weights)
-                                
-                                # Oblicz średnią ważoną dla wysokości
-                                new_points[i, 2] = np.sum(weights * points[neighbors, 2])
-                        
-                        points = new_points
-                        smoothed.points = points
-                        
-                elif smoothing_method == 'window':
-                    smoothed = surf.copy()
-                    points = smoothed.points
-                    
-                    for _ in range(iterations):
-                        tree = KDTree(points[:, :2])
-                        radius = 2.0 * relaxation_factor  # Promień zależny od współczynnika wygładzania
-                        
-                        for i in range(len(points)):
-                            neighbors = tree.query_ball_point(points[i, :2], r=radius)
-                            if neighbors:
-                                weights = np.exp(-np.sum((points[neighbors, :2] - points[i, :2])**2, axis=1))
-                                smoothed.points[i, 2] = np.average(points[neighbors, 2], weights=weights)
-
-                # Wizualizacja
-                self.frame.clear()
-
-                # Dodaj wygładzoną powierzchnię
-                self.frame.add_mesh(
-                    smoothed,
-                    scalars='Altitude',
-                    cmap='terrain',
-                    show_edges=False,
-                    smooth_shading=True,
-                    specular=0.3,
-                    specular_power=10,
-                    diffuse=0.7,
-                    ambient=0.3
-                )
-
-                # Dodaj oryginalne punkty
-                self.frame.add_points(
-                    point_cloud,
-                    color='red',
-                    point_size=10,
-                    render_points_as_spheres=True,
-                    opacity=0.8
-                )
-
-                # Dodaj siatkę pomocniczą
-                self.frame.show_grid(
-                    grid=True,
-                    location='outer',
-                    all_edges=True,
-                    xtitle='X [m]',
-                    ytitle='Y [m]',
-                    ztitle='Z [m]'
-                )
-
-                # Skala kolorów
-                self.frame.add_scalar_bar(
-                    title='Altitude [m]',
-                    vertical=True,
-                    position_x=0.85,
-                    position_y=0.15,
-                    n_labels=5,
-                    fmt='%.1f',
-                    width=0.1
-                )
-
-                # Statystyki
-                stats = {
-                    'Points': len(points),
-                    'Min altitude': points[:, 2].min(),
-                    'Max altitude': points[:, 2].max(),
-                    'Range': points[:, 2].max() - points[:, 2].min(),
-                    'Smoothing': smoothing_method,
-                    'Iterations': iterations,
-                    'Factor': relaxation_factor
-                }
-                
-                stats_text = '\n'.join([
-                    f"{k}: {v:.2f}m" if isinstance(v, float) else f"{k}: {v}"
-                    for k, v in stats.items()
-                ])
-                self.frame.add_text(
-                    stats_text,
-                    position='upper_left',
-                    font_size=11,
-                    shadow=False
-                )
-
-                # Kamera
-                # self.frame.camera_position = 'iso'
-                # self.frame.reset_camera()
-                
-                # Aktualizuj pasek statusu
-                self.statusBar.showMessage(f"Model wygenerowany: {smoothing_method}, {iterations} iteracji, współczynnik {relaxation_factor}")
-
-            except Exception as e:
-                print(f"Błąd podczas wizualizacji: {str(e)}")
-                self.statusBar.showMessage(f"Błąd: {str(e)}")
-                import traceback
-                traceback.print_exc()
-        
+ 
     def process_points(self, points, radius=1.0):
         """
         Przetwarza i uśrednia punkty w skupiskach.
@@ -538,157 +411,460 @@ class TerrainMapper(QMainWindow):
         
         return stats
 
-    def visualize_terrain(self):
-        if self.df is not None:
-            # Konwersja danych na typ numeryczny
-            self.df['Latitude'] = pd.to_numeric(self.df['Latitude'], errors='coerce')
-            self.df['Longitude'] = pd.to_numeric(self.df['Longitude'], errors='coerce')
-            self.df['Altitude'] = pd.to_numeric(self.df['Altitude'], errors='coerce')
-            
-            # Usuń brakujące dane
-            self.df.dropna(subset=['Latitude', 'Longitude', 'Altitude'], inplace=True)
-            
-            # Konwertuj współrzędne geograficzne na metryczne
-            points = np.array([self.geo_to_metric(lat, lon, alt) for lat, lon, alt in 
-                            zip(self.df['Latitude'], self.df['Longitude'], self.df['Altitude'])])
-            
-            if len(points) == 0:
-                print("Brak danych do wizualizacji")
-                return
-            
-            # Analizuj rozkład punktów przed przetworzeniem
-            print("\nStatystyki przed przetworzeniem:")
-            self.analyze_point_distribution(points)
-            
-            # Przetwórz i uśrednij punkty
-            processed_points = self.process_points(points, radius=1.0)  # radius w metrach
-            
-            print(f"\nLiczba punktów przed przetworzeniem: {len(points)}")
-            print(f"Liczba punktów po przetworzeniu: {len(processed_points)}")
-            
-            # Analizuj rozkład punktów po przetworzeniu
-            print("\nStatystyki po przetworzeniu:")
-            self.analyze_point_distribution(processed_points)
-            
-            # Normalizuj punkty
-            processed_points -= processed_points.min(axis=0)
-            
-            # Stwórz chmurę punktów
-            point_cloud = pv.PolyData(processed_points)
-            point_cloud['Altitude'] = processed_points[:, 2]
-            
-            # Stwórz siatkę
-            grid = point_cloud.delaunay_2d()
-            
-            # Wizualizacja
-            self.frame.clear()
-            
-            # Dodaj siatkę
-            self.frame.add_mesh(grid, 
-                            scalars='Altitude', 
-                            cmap='terrain',
-                            show_edges=True,
-                            edge_color='black',
-                            line_width=1,
-                            opacity=1.0)
-            
-            # Dodaj oryginalne punkty
-            self.frame.add_points(point_cloud, 
-                                color='blue', 
-                                point_size=10,
-                                render_points_as_spheres=True,
-                                label='Measurement points',
-                                opacity=1.0)
-                
-            # Dodaj elementy pomocnicze
-            self.frame.show_grid()
-            self.frame.show_axes()
-            
-            # Reset widoku kamery
-            # self.frame.reset_camera()
-            
-            # Dodaj informacje o danych
-            stats_text = (
-                f"Points: {len(processed_points)}\n"
-                f"Min altitude: {processed_points[:, 2].min():.2f}m\n"
-                f"Max altitude: {processed_points[:, 2].max():.2f}m\n"
-                f"Range: {processed_points[:, 2].max() - processed_points[:, 2].min():.2f}m"
-            )
-            self.frame.add_text(stats_text, position='upper_left', font_size=11)
-            
-        else:
-            print("Brak danych do wizualizacji")
-            
-    def visualize_terrain_raw(self):
-        if self.df is not None:
-            # Konwersja danych na typ numeryczny
-            self.df['Latitude'] = pd.to_numeric(self.df['Latitude'], errors='coerce')
-            self.df['Longitude'] = pd.to_numeric(self.df['Longitude'], errors='coerce')
-            self.df['Altitude'] = pd.to_numeric(self.df['Altitude'], errors='coerce')
-            
-            # Usuń brakujące dane
-            self.df.dropna(subset=['Latitude', 'Longitude', 'Altitude'], inplace=True)
-            
-            # Konwertuj współrzędne geograficzne na metryczne
-            points = np.array([self.geo_to_metric(lat, lon, alt) for lat, lon, alt in 
-                            zip(self.df['Latitude'], self.df['Longitude'], self.df['Altitude'])])
-            
-            if len(points) == 0:
-                print("Brak danych do wizualizacji")
-                return
-            
-            # Analizuj rozkład punktów przed przetworzeniem
-            print("\nStatystyki przed przetworzeniem:")
-            self.analyze_point_distribution(points)
-            
-            # Normalizuj punkty
+    def create_visualization(self, points, raw=False):
+        """Create basic visualization for both raw and processed point clouds."""
+        try:
+            # Sprawdź typy danych
+            print(f"Typ danych punktów: {type(points)}")
+            print(f"Typy danych w punktach: {points.dtype}")
+
+            # Normalizacja punktów
             points -= points.min(axis=0)
             
-            # Stwórz chmurę punktów
+            # Tworzenie chmury punktów
             point_cloud = pv.PolyData(points)
             point_cloud['Altitude'] = points[:, 2]
-            
-            # Stwórz siatkę
+
+            # Tworzenie siatki
             grid = point_cloud.delaunay_2d()
             
             # Wizualizacja
             self.frame.clear()
             
+                        
+            # Dodaj punkty
+            self.frame.add_points(point_cloud, 
+                                color='red' if raw else 'blue', 
+                                point_size=5 if raw else 10,
+                                render_points_as_spheres=True)
+            
             # Dodaj siatkę
             self.frame.add_mesh(grid, 
-                            scalars='Altitude', 
-                            cmap='terrain',
-                            show_edges=True,
-                            edge_color='black',
-                            line_width=1)
-            
-            # Dodaj oryginalne punkty
-            self.frame.add_points(point_cloud, 
-                                color='darkred', 
-                                point_size=5,
-                                render_points_as_spheres=True,
-                                label='Measurement points')
+                                scalars='Altitude', 
+                                cmap='terrain',
+                                show_edges=True if raw else False,
+                                edge_color='black',
+                                line_width=0.6)
             
             # Dodaj elementy pomocnicze
-            self.frame.show_grid()
+            self.frame.show_grid(
+                grid=True,
+                location='outer',
+                all_edges=False,
+                xtitle='X [m]',
+                ytitle='Y [m]',
+                ztitle='Z [m]'
+            )
             self.frame.show_axes()
             
-            # Reset widoku kamery
-            # self.frame.reset_camera()
+            # Statystyki
+            stats = {
+                'Points': len(points),
+                'Min altitude': points[:, 2].min(),
+                'Max altitude': points[:, 2].max(),
+                'Range': points[:, 2].max() - points[:, 2].min(),
+                'Type': 'Raw' if raw else 'Processed'
+            }
             
-            # Dodaj informacje o danych
-            stats_text = (
-                f"Points: {len(points)}\n"
-                f"Min altitude: {points[:, 2].min():.2f}m\n"
-                f"Max altitude: {points[:, 2].max():.2f}m\n"
-                f"Range: {points[:, 2].max() - points[:, 2].min():.2f}m"
-            )
+            stats_text = '\n'.join([
+                f"{k}: {v:.2f}m" if isinstance(v, float) else f"{k}: {v}"
+                for k, v in stats.items()
+            ])
             self.frame.add_text(stats_text, position='upper_left', font_size=11)
             
+            self.statusBar.showMessage(f"Visualization created: {stats['Type']} point cloud")
+            
+        except Exception as e:
+            print(f"Error in visualization: {str(e)}")
+            self.statusBar.showMessage(f"Error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def create_smooth_surface(self, points, smoothing_method, iterations, relaxation_factor):
+        """Create smoothed surface visualization with corrected texturing."""
+        try:
+            print(f"Applying smoothing parameters:")
+            print(f"Method: {smoothing_method}")
+            print(f"Iterations: {iterations}")
+            print(f"Smoothing factor: {relaxation_factor}")
+
+            # Normalizacja punktów
+            points -= points.min(axis=0)
+            
+            # Tworzenie chmury punktów
+            point_cloud = pv.PolyData(points)
+            point_cloud['Altitude'] = points[:, 2]
+
+            # Tworzenie początkowej siatki
+            surf = point_cloud.delaunay_2d()
+            
+            # Zainicjuj zmienną smoothed przed warunkami
+            smoothed = None
+            
+            # Wygładzanie powierzchni
+            if smoothing_method == 'laplacian':
+                smoothed = surf.smooth(
+                    n_iter=iterations,
+                    relaxation_factor=relaxation_factor,
+                    feature_angle=60,
+                    boundary_smoothing=True,
+                    convergence=0.1,
+                    progress_bar=True
+                )
+            elif smoothing_method == 'gaussian':
+                smoothed = surf.copy()
+                pts = smoothed.points
+                sigma = relaxation_factor
+                
+                for _ in range(iterations):
+                    tree = KDTree(pts[:, :2])
+                    new_points = pts.copy()
+                    radius = 3 * sigma
+                    
+                    for i in range(len(pts)):
+                        neighbors = tree.query_ball_point(pts[i, :2], r=radius)
+                        if neighbors:
+                            distances = np.sum((pts[neighbors, :2] - pts[i, :2])**2, axis=1)
+                            weights = np.exp(-distances / (2 * sigma**2))
+                            weights = weights / np.sum(weights)
+                            new_points[i, 2] = np.sum(weights * pts[neighbors, 2])
+                    
+                    pts = new_points
+                    smoothed.points = pts
+                    
+            elif smoothing_method == 'window':
+                smoothed = surf.copy()
+                pts = smoothed.points
+                
+                for _ in range(iterations):
+                    tree = KDTree(pts[:, :2])
+                    radius = 2.0 * relaxation_factor
+                    
+                    for i in range(len(pts)):
+                        neighbors = tree.query_ball_point(pts[i, :2], r=radius)
+                        if neighbors:
+                            weights = np.exp(-np.sum((pts[neighbors, :2] - pts[i, :2])**2, axis=1))
+                            smoothed.points[i, 2] = np.average(pts[neighbors, 2], weights=weights)
+
+            # Sprawdź czy wygładzanie się powiodło
+            if smoothed is None:
+                raise ValueError(f"Smoothing failed with method: {smoothing_method}")
+
+            # Pobierz punkty po wygładzeniu
+            smoothed_points = smoothed.points
+            
+            # Aktualizacja wartości wysokości po wygładzeniu
+            smoothed.point_data['Altitude'] = smoothed_points[:, 2]
+            
+            # Obliczenie nachylenia terenu
+            terrain_slope = smoothed.compute_derivative(scalars='Altitude')
+            
+            # Obliczanie nachylenie terenu modelu w procentach
+            # Obliczenie kąta w radianach używając arctangensa gradientu
+            # Konwersja na procenty: tan(kąt) * 100
+            gradient_x = terrain_slope['gradient'][:, 0]
+            gradient_y = terrain_slope['gradient'][:, 1]
+            slope_magnitude = np.sqrt(gradient_x**2 + gradient_y**2) * 100  # konwersja na procenty
+            smoothed.point_data['Slope'] = slope_magnitude
+            
+            # Wizualizacja
+            self.frame.clear()
+
+            # Dodaj wygładzoną powierzchnię z zaktualizowaną teksturą
+            mesh_actor = self.frame.add_mesh(
+                smoothed,
+                scalars='Altitude',
+                cmap='terrain',
+                show_edges=False,
+                smooth_shading=True,
+                specular=0.3,
+                specular_power=10,
+                diffuse=0.7,
+                ambient=0.3,
+                scalar_bar_args={
+                    'title': 'Altitude [m]',
+                    'vertical': True,
+                    'position_x': 0.85,
+                    'position_y': 0.15,
+                    'n_labels': 5,
+                    'fmt': '%.1f',
+                    'width': 0.1
+                }
+            )
+
+            # Siatka pomocnicza
+            self.frame.show_grid(
+                grid=True,
+                location='outer',
+                all_edges=True,
+                xtitle='X [m]',
+                ytitle='Y [m]',
+                ztitle='Z [m]'
+            )
+            
+            # Referencje do oryginalnych kolormap
+            self.altitude_cmap = 'terrain'
+            self.slope_cmap = 'fire'
+            
+            # Zmienna do śledzenia aktualnego skalara
+            self.current_scalar = 'Altitude'
+
+            # Poprawiona funkcja przełączająca skalar
+            def toggle_scalar(flag):
+                try:
+                    if self.current_scalar == 'Altitude':
+                        # Przełącz na nachylenie
+                        mesh_actor.mapper.array_name = 'Slope'
+                        mesh_actor.mapper.scalar_range = [slope_magnitude.min(), slope_magnitude.max()]
+                        mesh_actor.mapper.lookup_table.cmap = 'viridis'
+                        self.frame.scalar_bar.SetTitle('Slope [%]')
+                        self.current_scalar = 'Slope'
+                    else:
+                        # Przełącz na wysokość
+                        mesh_actor.mapper.array_name = 'Altitude'
+                        mesh_actor.mapper.scalar_range = [smoothed_points[:, 2].min(), smoothed_points[:, 2].max()]
+                        mesh_actor.mapper.lookup_table.cmap = 'terrain'
+                        self.frame.scalar_bar.SetTitle('Altitude [m]')
+                        self.current_scalar = 'Altitude'
+
+                    # Aktualizacja widoku
+                    self.frame.render()
+                    
+                    # Aktualizuj pasek statusu
+                    self.statusBar.showMessage(f"Displaying: {self.current_scalar}")
+                    
+                except Exception as e:
+                    print(f"Error in toggle_scalar: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+
+            # Dodaj przycisk przełączający z etykietą
+            self.frame.add_checkbox_button_widget(
+                toggle_scalar,
+                value=False,
+                size=30,
+                position=(10, 10),
+                color_on='green',
+                color_off='red',
+                background_color='black'
+            )
+
+            # Dodaj tekst opisujący przycisk
+            self.frame.add_text(
+                'Toggle Height/Slope',
+                position=(50, 10),
+                font_size=10,
+                color='black',
+                shadow=True
+            )
+
+            # Przygotuj statystyki
+            stats = {
+                'Points': len(smoothed_points),
+                'Min altitude': round(float(smoothed_points[:, 2].min()),2),
+                'Max altitude': round(float(smoothed_points[:, 2].max()),2),
+                'Range': round(float(smoothed_points[:, 2].max() - smoothed_points[:, 2].min()), 2),
+                'Smoothing': smoothing_method,
+                'Iterations': iterations,
+                'Factor': relaxation_factor,
+                'Max slope': f"{float(slope_magnitude.max()):.1f}%",  # Nachylenie w procentach
+                'Mean slope': f"{float(slope_magnitude.mean()):.1f}%"  # Średnie nachylenie w procentach
+            }
+            
+            # Zaktualizowany format wyświetlania statystyk
+            stats_text = '\n'.join([
+                f"{k}: {v}m" if k in ['Min altitude', 'Max altitude', 'Range'] else
+                f"{k}: {v}" for k, v in stats.items()
+            ])
+            
+            self.frame.add_text(
+                stats_text,
+                position='upper_left',
+                font_size=11,
+                shadow=False
+            )
+            
+            self.statusBar.showMessage(
+                f"Model generated: {smoothing_method}, {iterations} iterations, factor {relaxation_factor}"
+            )
+
+        except Exception as e:
+            print(f"Error during visualization: {str(e)}")
+            self.statusBar.showMessage(f"Error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def visualize_terrain_interpolation(self):
+        """Visualize interpolated surface from merged sessions."""
+        if self.df is None:
+            self.df = self.merge_session_data()
+            
+        if self.df is None:
+            self.statusBar.showMessage("No data to visualize")
+            return
+        
+        # Get visualization parameters
+        smoothing_method = self.smoothing_method.currentText()
+        iterations = self.smoothing_iterations.value()
+        relaxation_factor = self.smoothing_factor.value()
+        
+        # Konwersja kolumny Altitude na float
+        self.df['Altitude'] = self.df['Altitude'].astype(float)
+        
+        # Convert to metric coordinates
+        points = np.array([self.geo_to_metric(lat, lon, alt) for lat, lon, alt in 
+                        zip(self.df['Latitude'], self.df['Longitude'], self.df['Altitude'])])
+        
+        # Create and smooth surface
+        self.create_smooth_surface(points, smoothing_method, iterations, relaxation_factor)
+
+    def visualize_terrain_raw(self):
+        """Visualize raw point cloud from merged sessions."""
+        merged_df = self.merge_session_data()
+        if merged_df is None:
+            self.statusBar.showMessage("No data to visualize")
+            return
+            
+        self.df = merged_df  # Store for other visualizations
+        
+        # Konwersja kolumny Altitude na float
+        self.df['Altitude'] = self.df['Altitude'].astype(float)
+        
+        # Convert to metric coordinates
+        points = np.array([self.geo_to_metric(lat, lon, alt) for lat, lon, alt in 
+                        zip(merged_df['Latitude'], merged_df['Longitude'], merged_df['Altitude'])])
+        
+        # Create visualization
+        self.create_visualization(points, raw=True)
+
+    def visualize_terrain(self):
+        """Visualize processed point cloud from merged sessions."""
+        if self.df is None:
+            self.df = self.merge_session_data()
+            
+        if self.df is None:
+            self.statusBar.showMessage("No data to visualize")
+            return
+        
+        # Konwersja kolumny Altitude na float
+        self.df['Altitude'] = self.df['Altitude'].astype(float)
+            
+        points = np.array([self.geo_to_metric(lat, lon, alt) for lat, lon, alt in 
+                        zip(self.df['Latitude'], self.df['Longitude'], self.df['Altitude'])])
+        
+        # Process points
+        processed_points = self.process_points(points, radius=1.0)
+        
+        # Create visualization
+        self.create_visualization(processed_points)
+
+    def update_visualization_buttons(self):
+        """Enable/disable visualization buttons based on selection."""
+        selected_items = self.session_list.selectedItems()
+        enable_buttons = len(selected_items) > 0
+        
+        self.visualize_button_raw.setEnabled(enable_buttons)
+        self.visualize_button.setEnabled(enable_buttons)
+        self.visualize_button_interpolation.setEnabled(enable_buttons)
+
+    def merge_session_data(self):
+        """Merge selected session data based on chosen method."""
+        selected_items = self.session_list.selectedItems()
+        if not selected_items:
+            return None
+            
+        selected_sessions = [item.data(Qt.ItemDataRole.UserRole) for item in selected_items]
+        merge_method = self.merge_method.currentText()
+        
+        all_data = []
+        for session_name in selected_sessions:
+            df = self.session_data.get(session_name)
+            if df is not None:
+                df['session_name'] = session_name  # Add session identifier
+                all_data.append(df)
+        
+        if not all_data:
+            return None
+            
+        merged_df = pd.concat(all_data, ignore_index=True)
+        
+        if merge_method == 'Average':
+            # Group by close points and average their values
+            merged_df = self.average_nearby_points(merged_df)
+        elif merge_method == 'Weighted':
+            # Apply weighted averaging based on measurement quality
+            merged_df = self.weighted_average_points(merged_df)
+            
+        return merged_df
+    
+    def average_nearby_points(self, df, radius=1.0):
+        """Average points that are within specified radius of each other."""
+        points = np.array([self.geo_to_metric(lat, lon, alt) for lat, lon, alt in 
+                          zip(df['Latitude'], df['Longitude'], df['Altitude'])])
+        
+        tree = KDTree(points[:, :2])
+        processed_points = []
+        processed_indices = set()
+        
+        for i in range(len(points)):
+            if i in processed_indices:
+                continue
+                
+            # Find nearby points
+            nearby_indices = tree.query_ball_point(points[i, :2], r=radius)
+            if nearby_indices:
+                # Average the points
+                cluster_points = points[nearby_indices]
+                mean_point = cluster_points.mean(axis=0)
+                processed_points.append(mean_point)
+                processed_indices.update(nearby_indices)
+        
+        result_df = pd.DataFrame({
+            'Latitude': [p[0] for p in processed_points],
+            'Longitude': [p[1] for p in processed_points],
+            'Altitude': [p[2] for p in processed_points]
+        })
+        
+        return result_df
+    
+    def weighted_average_points(self, df, radius=1.0):
+        """Average points with weights based on measurement quality."""
+        points = np.array([self.geo_to_metric(lat, lon, alt) for lat, lon, alt in 
+                          zip(df['Latitude'], df['Longitude'], df['Altitude'])])
+        
+        # Create weights based on available quality metrics
+        if 'HDOP' in df.columns:
+            # Lower HDOP means better quality
+            weights = 1 / df['HDOP']
         else:
-            print("Brak danych do wizualizacji")
-
-
+            weights = np.ones(len(points))
+        
+        tree = KDTree(points[:, :2])
+        processed_points = []
+        processed_indices = set()
+        
+        for i in range(len(points)):
+            if i in processed_indices:
+                continue
+                
+            nearby_indices = tree.query_ball_point(points[i, :2], r=radius)
+            if nearby_indices:
+                cluster_points = points[nearby_indices]
+                cluster_weights = weights[nearby_indices]
+                
+                # Calculate weighted average
+                weighted_mean = np.average(cluster_points, weights=cluster_weights, axis=0)
+                processed_points.append(weighted_mean)
+                processed_indices.update(nearby_indices)
+        
+        result_df = pd.DataFrame({
+            'Latitude': [p[0] for p in processed_points],
+            'Longitude': [p[1] for p in processed_points],
+            'Altitude': [p[2] for p in processed_points]
+        })
+        
+        return result_df
+    
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
