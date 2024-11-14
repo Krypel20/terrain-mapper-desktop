@@ -52,6 +52,15 @@ class DatabaseConnection:
         cur.close()
         return pd.DataFrame(data, columns=['Time', 'Longitude', 'Latitude', 'Altitude'])
 
+    def delete_session(self, session_name):
+        conn = self.connect()
+        cur = conn.cursor()
+        table_name = f"session_{session_name.lower().replace(' ', '_')}"
+        cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(table_name)))
+        cur.execute(sql.SQL("DELETE FROM measurement_sessions WHERE session_name = %s"), (session_name,))
+        conn.commit()
+        cur.close()
+
     def __enter__(self):
         self.connect()
         return self

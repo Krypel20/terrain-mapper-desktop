@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout, 
     QWidget, QComboBox, QLabel, QSpinBox, QDoubleSpinBox, QGroupBox,
     QStatusBar, QToolBar, QMenuBar, QMenu, QStyle, QFrame, QFileDialog,
-    QListWidget, QListWidgetItem, QCheckBox
+    QListWidget, QListWidgetItem, QMessageBox
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QIcon
@@ -38,7 +38,7 @@ class TerrainMapper(QMainWindow):
             user="pkrypel",
             password="20122002",
             host="localhost",
-            port="5433"
+            port="5434" #5433 // 5434 - Desktop // Laptop
         )
         # słownik do przechowywania ładowanych danych sesji
         self.session_data = {}
@@ -86,11 +86,15 @@ class TerrainMapper(QMainWindow):
         # Menu File
         file_menu = menubar.addMenu("File")
         
-        # Akcje w menu File
-        new_action = QAction("New Session", self)
-        new_action.setShortcut("Ctrl+N")
-        new_action.triggered.connect(self.new_session)
+        # Dodanie usuwania sesji
+        delete_action = QAction("Delete Sessions", self)
+        delete_action.setShortcut("Del")
+        delete_action.triggered.connect(self.delete_selected_sessions)
         
+        file_menu.addAction(delete_action)
+        file_menu.addSeparator()
+        
+        # Akcje w menu
         export_action = QAction("Export Model", self)
         export_action.setShortcut("Ctrl+E")
         export_action.triggered.connect(self.export_model)
@@ -99,7 +103,6 @@ class TerrainMapper(QMainWindow):
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         
-        file_menu.addAction(new_action)
         file_menu.addAction(export_action)
         file_menu.addSeparator()
         file_menu.addAction(exit_action)
@@ -133,13 +136,39 @@ class TerrainMapper(QMainWindow):
         # Add session list widget
         self.session_list = SessionListWidget()
         self.session_list.itemSelectionChanged.connect(self.update_visualization_buttons)
+
+        # Buttons layout
+        buttons_layout = QHBoxLayout()
         
         # Add refresh button
         self.load_button = QPushButton("Refresh Sessions")
         self.load_button.clicked.connect(self.load_sessions)
         
+        # Add delete button
+        self.delete_button = QPushButton("Delete Selected")
+        self.delete_button.clicked.connect(self.delete_selected_sessions)
+        self.delete_button.setStyleSheet("""
+            QPushButton {
+                background-color: #ff4444;
+                color: white;
+                padding: 5px;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #ff0000;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+            }
+        """)
+        self.delete_button.setEnabled(False)
+        
+        buttons_layout.addWidget(self.load_button)
+        buttons_layout.addWidget(self.delete_button)
+        
         session_layout.addWidget(self.session_list)
-        session_layout.addWidget(self.load_button)
+        session_layout.addLayout(buttons_layout)
         session_group.setLayout(session_layout)
         
         # Visualization parameters group
@@ -253,10 +282,6 @@ class TerrainMapper(QMainWindow):
         visualization_layout.addWidget(self.frame)
         
         return visualization_widget
-    
-    def new_session(self):
-        # Implementacja tworzenia nowej sesji
-        self.statusBar.showMessage("Creating new session...")
         
     def export_model(self):
         # Implementacja eksportu modelu
@@ -412,65 +437,99 @@ class TerrainMapper(QMainWindow):
         return stats
 
     def create_visualization(self, points, raw=False):
-        """Create basic visualization for both raw and processed point clouds."""
+        """Create visualization with real-world dimensions."""
         try:
-            # Sprawdź typy danych
-            print(f"Typ danych punktów: {type(points)}")
-            print(f"Typy danych w punktach: {points.dtype}")
-
-            # Normalizacja punktów
-            points -= points.min(axis=0)
+            # Oblicz wymiary obszaru
+            x_min, y_min = points[:, 0].min(), points[:, 1].min()
+            x_max, y_max = points[:, 0].max(), points[:, 1].max()
+            
+            # Konwertuj współrzędne na względne od początku układu (0,0),
+            # ale zachowaj rzeczywiste odległości
+            normalized_points = points.copy()
+            normalized_points[:, 0] -= x_min  # X
+            normalized_points[:, 1] -= y_min  # Y
+            # Nie normalizujemy Z (wysokości)
+            
+            # Oblicz wymiary terenu
+            width = x_max - x_min
+            length = y_max - y_min
+            height = points[:, 2].max() - points[:, 2].min()
             
             # Tworzenie chmury punktów
-            point_cloud = pv.PolyData(points)
-            point_cloud['Altitude'] = points[:, 2]
+            point_cloud = pv.PolyData(normalized_points)
+            point_cloud['Altitude'] = points[:, 2]  # Oryginalne wysokości
 
             # Tworzenie siatki
             grid = point_cloud.delaunay_2d()
+
+            # Generowanie iso-linii na siatce
+            n_contours = 15  # liczba linii poziomicowych
+            contour_values = np.linspace(
+                points[:, 2].min(), 
+                points[:, 2].max(), 
+                n_contours
+            )
+            contours = grid.contour(contour_values)
             
             # Wizualizacja
             self.frame.clear()
             
-                        
-            # Dodaj punkty
-            self.frame.add_points(point_cloud, 
-                                color='red' if raw else 'blue', 
-                                point_size=5 if raw else 10,
-                                render_points_as_spheres=True)
-            
             # Dodaj siatkę
             self.frame.add_mesh(grid, 
-                                scalars='Altitude', 
-                                cmap='terrain',
-                                show_edges=True if raw else False,
-                                edge_color='black',
-                                line_width=0.6)
+                            scalars='Altitude', 
+                            cmap="terrain", 
+                            show_edges=True if raw else False,
+                            edge_color='black',
+                            line_width=1)
             
-            # Dodaj elementy pomocnicze
+            if not raw:
+                # Dodaj iso-linie
+                self.frame.add_mesh(
+                    contours, 
+                    color="black", 
+                    line_width=2,
+                    render_lines_as_tubes=True,
+                    opacity=0.7
+                )
+            
+            # Dodaj punkty
+            self.frame.add_points(point_cloud, 
+                                color='darkred' if raw else 'darkblue', 
+                                point_size=5 if raw else 5,
+                                render_points_as_spheres=True)
+            
+            # Dodaj siatkę pomocniczą z rzeczywistymi wymiarami
             self.frame.show_grid(
                 grid=True,
                 location='outer',
-                all_edges=False,
+                all_edges=True,
                 xtitle='X [m]',
                 ytitle='Y [m]',
                 ztitle='Z [m]'
             )
             self.frame.show_axes()
             
-            # Statystyki
+            # Statystyki z rzeczywistymi wymiarami
             stats = {
                 'Points': len(points),
-                'Min altitude': points[:, 2].min(),
-                'Max altitude': points[:, 2].max(),
-                'Range': points[:, 2].max() - points[:, 2].min(),
+                'Area width': f"{width:.1f}m",
+                'Area length': f"{length:.1f}m",
+                'Min altitude': f"{float(points[:, 2].min()):.2f}m",
+                'Max altitude': f"{float(points[:, 2].max()):.2f}m",
+                'height difference': f"{height:.2f}m",
+                'Area': f"{(width * length):.1f}m²",
                 'Type': 'Raw' if raw else 'Processed'
             }
             
             stats_text = '\n'.join([
-                f"{k}: {v:.2f}m" if isinstance(v, float) else f"{k}: {v}"
-                for k, v in stats.items()
+                f"{k}: {v}" for k, v in stats.items()
             ])
-            self.frame.add_text(stats_text, position='upper_left', font_size=11)
+            self.frame.add_text(
+                stats_text,
+                position='upper_left',
+                font_size=11,
+                shadow=False
+            )
             
             self.statusBar.showMessage(f"Visualization created: {stats['Type']} point cloud")
             
@@ -481,19 +540,32 @@ class TerrainMapper(QMainWindow):
             traceback.print_exc()
 
     def create_smooth_surface(self, points, smoothing_method, iterations, relaxation_factor):
-        """Create smoothed surface visualization with corrected texturing."""
+        """Create smoothed terrain surface visualization with corrected texturing."""
         try:
             print(f"Applying smoothing parameters:")
             print(f"Method: {smoothing_method}")
             print(f"Iterations: {iterations}")
             print(f"Smoothing factor: {relaxation_factor}")
 
-            # Normalizacja punktów
-            points -= points.min(axis=0)
+            # Oblicz wymiary obszaru
+            x_min, y_min = points[:, 0].min(), points[:, 1].min()
+            x_max, y_max = points[:, 0].max(), points[:, 1].max()
+            
+            # Konwertuj współrzędne na względne od początku układu (0,0),
+            # ale zachowaj rzeczywiste odległości
+            normalized_points = points.copy()
+            normalized_points[:, 0] -= x_min  # X
+            normalized_points[:, 1] -= y_min  # Y
+            # Nie normalizujemy Z (wysokości)
+            
+            # Oblicz wymiary terenu
+            width = x_max - x_min
+            length = y_max - y_min
+            height = points[:, 2].max() - points[:, 2].min()
             
             # Tworzenie chmury punktów
-            point_cloud = pv.PolyData(points)
-            point_cloud['Altitude'] = points[:, 2]
+            point_cloud = pv.PolyData(normalized_points)  # Użyj znormalizowanych punktów
+            point_cloud['Altitude'] = points[:, 2]  # Oryginalne wysokości
 
             # Tworzenie początkowej siatki
             surf = point_cloud.delaunay_2d()
@@ -566,7 +638,7 @@ class TerrainMapper(QMainWindow):
             gradient_y = terrain_slope['gradient'][:, 1]
             slope_magnitude = np.sqrt(gradient_x**2 + gradient_y**2) * 100  # konwersja na procenty
             smoothed.point_data['Slope'] = slope_magnitude
-            
+
             # Wizualizacja
             self.frame.clear()
 
@@ -592,6 +664,31 @@ class TerrainMapper(QMainWindow):
                 }
             )
 
+            # Dodaj punkty
+            self.frame.add_points(point_cloud, 
+                                color='lightblue', 
+                                point_size=2,
+                                render_points_as_spheres=True)
+
+            # Generowanie iso-linii na wygładzonym modelu
+            n_contours = 20
+            contour_values = np.linspace(
+                smoothed_points[:, 2].min(),
+                smoothed_points[:, 2].max(),
+                n_contours
+            )
+            contours = smoothed.contour(contour_values)
+        
+            # Dodaj iso-linie z dostosowaniem do aktualnego skalara
+            self.frame.add_mesh(
+                contours, 
+                color="black", 
+                line_width=2,
+                render_lines_as_tubes=True,
+                opacity=0.7,
+                name='contours'  # nazwa do późniejszego usunięcia
+            )
+
             # Siatka pomocnicza
             self.frame.show_grid(
                 grid=True,
@@ -612,6 +709,9 @@ class TerrainMapper(QMainWindow):
             # Poprawiona funkcja przełączająca skalar
             def toggle_scalar(flag):
                 try:
+                    # Usuń stare iso-linie
+                    self.frame.remove_actor('contours')
+
                     if self.current_scalar == 'Altitude':
                         # Przełącz na nachylenie
                         mesh_actor.mapper.array_name = 'Slope'
@@ -619,13 +719,47 @@ class TerrainMapper(QMainWindow):
                         mesh_actor.mapper.lookup_table.cmap = 'viridis'
                         self.frame.scalar_bar.SetTitle('Slope [%]')
                         self.current_scalar = 'Slope'
+
+                        # Generuj iso-linie dla nachylenia
+                        contours = smoothed.contour(isovalues=np.linspace(
+                            smoothed_points[:, 2].min(),
+                            smoothed_points[:, 2].max(),
+                            20
+                        ))
+                        self.frame.add_mesh(
+                            contours, 
+                            color="white", 
+                            line_width=2,
+                            render_lines_as_tubes=True,
+                            opacity=0.7,
+                            name='contours'  # nazwa do późniejszego usunięcia
+                        )
                     else:
                         # Przełącz na wysokość
                         mesh_actor.mapper.array_name = 'Altitude'
                         mesh_actor.mapper.scalar_range = [smoothed_points[:, 2].min(), smoothed_points[:, 2].max()]
-                        mesh_actor.mapper.lookup_table.cmap = 'terrain'
+                        mesh_actor.mapper.lookup_table.cmap = 'magma'
                         self.frame.scalar_bar.SetTitle('Altitude [m]')
                         self.current_scalar = 'Altitude'
+
+                        # Generuj iso-linie dla wysokości
+                        slope_contour_values = np.linspace(
+                            slope_magnitude.min(),
+                            slope_magnitude.max(),
+                            15
+                        )
+                        slope_contours = smoothed.contour(
+                            slope_contour_values,
+                            scalars='Slope'
+                        )
+                        self.frame.add_mesh(
+                            slope_contours,
+                            color="black",
+                            line_width=2,
+                            render_lines_as_tubes=True,
+                            opacity=0.5,
+                            name='contours'
+                        )
 
                     # Aktualizacja widoku
                     self.frame.render()
@@ -653,7 +787,7 @@ class TerrainMapper(QMainWindow):
             self.frame.add_text(
                 'Toggle Height/Slope',
                 position=(50, 10),
-                font_size=10,
+                font_size=9,
                 color='black',
                 shadow=True
             )
@@ -661,14 +795,17 @@ class TerrainMapper(QMainWindow):
             # Przygotuj statystyki
             stats = {
                 'Points': len(smoothed_points),
-                'Min altitude': round(float(smoothed_points[:, 2].min()),2),
-                'Max altitude': round(float(smoothed_points[:, 2].max()),2),
-                'Range': round(float(smoothed_points[:, 2].max() - smoothed_points[:, 2].min()), 2),
+                'Area width': f"{width:.1f}m",
+                'Area length': f"{length:.1f}m",
+                'Min altitude': f"{float(points[:, 2].min()):.2f}m",
+                'Max altitude': f"{float(points[:, 2].max()):.2f}m",
+                'Height range': f"{height:.2f}m",
+                'Area': f"{(width * length):.1f}m²",
+                'Max slope': f"{float(slope_magnitude.max()):.1f}%",
+                'Mean slope': f"{float(slope_magnitude.mean()):.1f}%",
                 'Smoothing': smoothing_method,
                 'Iterations': iterations,
-                'Factor': relaxation_factor,
-                'Max slope': f"{float(slope_magnitude.max()):.1f}%",  # Nachylenie w procentach
-                'Mean slope': f"{float(slope_magnitude.mean()):.1f}%"  # Średnie nachylenie w procentach
+                'Factor': relaxation_factor
             }
             
             # Zaktualizowany format wyświetlania statystyk
@@ -715,8 +852,11 @@ class TerrainMapper(QMainWindow):
         points = np.array([self.geo_to_metric(lat, lon, alt) for lat, lon, alt in 
                         zip(self.df['Latitude'], self.df['Longitude'], self.df['Altitude'])])
         
+        # Process points
+        processed_points = self.process_points(points, radius=1.0)
+        
         # Create and smooth surface
-        self.create_smooth_surface(points, smoothing_method, iterations, relaxation_factor)
+        self.create_smooth_surface(processed_points, smoothing_method, iterations, relaxation_factor)
 
     def visualize_terrain_raw(self):
         """Visualize raw point cloud from merged sessions."""
@@ -759,13 +899,52 @@ class TerrainMapper(QMainWindow):
         self.create_visualization(processed_points)
 
     def update_visualization_buttons(self):
-        """Enable/disable visualization buttons based on selection."""
+        """Enable/disable buttons based on selection."""
         selected_items = self.session_list.selectedItems()
         enable_buttons = len(selected_items) > 0
         
         self.visualize_button_raw.setEnabled(enable_buttons)
         self.visualize_button.setEnabled(enable_buttons)
         self.visualize_button_interpolation.setEnabled(enable_buttons)
+        self.delete_button.setEnabled(enable_buttons)
+
+    def delete_selected_sessions(self):
+        """Delete selected sessions after confirmation."""
+        selected_items = self.session_list.selectedItems()
+        if not selected_items:
+            return
+            
+        session_names = [item.data(Qt.ItemDataRole.UserRole) for item in selected_items]
+        
+        # Pokaż dialog potwierdzenia
+        sessions_str = "\n".join(session_names)
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setText("Are you sure you want to delete the following sessions?")
+        msg.setInformativeText(f"Selected sessions:\n{sessions_str}\n\nThis action cannot be undone!")
+        msg.setWindowTitle("Confirm Deletion")
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg.setDefaultButton(QMessageBox.StandardButton.No)
+        
+        if msg.exec() == QMessageBox.StandardButton.Yes:
+            deleted_count = 0
+            for session_name in session_names:
+                if self.db.delete_session(session_name):
+                    deleted_count += 1
+            
+            # Odśwież listę sesji
+            self.load_sessions()
+            
+            # Wyczyść aktualną wizualizację
+            if hasattr(self, 'frame'):
+                self.frame.clear()
+            
+            # Aktualizuj status
+            self.statusBar.showMessage(f"Successfully deleted {deleted_count} session(s)")
+            
+            # Jeśli usunięto aktualnie wyświetlaną sesję, wyczyść dane
+            if self.df is not None and any(session_name in self.df['session_name'].values for session_name in session_names):
+                self.df = None
 
     def merge_session_data(self):
         """Merge selected session data based on chosen method."""
@@ -864,7 +1043,7 @@ class TerrainMapper(QMainWindow):
         })
         
         return result_df
-    
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
