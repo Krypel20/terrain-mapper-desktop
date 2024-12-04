@@ -15,6 +15,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QIcon
 from pyvistaqt import QtInteractor
 from db_connection import DatabaseConnection
+from pykrige.ok import OrdinaryKriging
 
 class SessionListWidget(QListWidget):
     def __init__(self, parent=None):
@@ -38,7 +39,7 @@ class TerrainMapper(QMainWindow):
             user="pkrypel",
             password="20122002",
             host="localhost",
-            port="5434" #5433 // 5434 - Desktop // Laptop
+            port="5433" #5433 // 5434 - Desktop // Laptop
         )
         # słownik do przechowywania ładowanych danych sesji
         self.session_data = {}
@@ -222,9 +223,29 @@ class TerrainMapper(QMainWindow):
         self.visualize_button_interpolation.clicked.connect(self.visualize_terrain_interpolation)
         self.visualize_button_interpolation.setEnabled(False)
         
+        self.visualize_button_kriging = QPushButton("Create Kriging Model")
+        self.visualize_button_kriging.clicked.connect(self.create_kriging_model)
+        self.visualize_button_kriging.setEnabled(False)
+        self.visualize_button_kriging.setStyleSheet("""
+            QPushButton {
+                background-color: #2E8B57;
+                color: white;
+                padding: 5px;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #3CB371;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+            }
+        """)
+        
         buttons_layout.addWidget(self.visualize_button_raw)
         buttons_layout.addWidget(self.visualize_button)
         buttons_layout.addWidget(self.visualize_button_interpolation)
+        buttons_layout.addWidget(self.visualize_button_kriging)
         buttons_group.setLayout(buttons_layout)
         
         # Add all groups to main layout
@@ -375,43 +396,222 @@ class TerrainMapper(QMainWindow):
         
         return smoothed
  
-    def process_points(self, points, radius=1.0):
+    def process_points(self, points, radius=3.0):
         """
-        Przetwarza i uśrednia punkty w skupiskach.
+        Przetwarza punkty pomiarowe poprzez analizę skupisk i korektę wysokości.
         
         Args:
-            points: numpy array z punktami [x, y, z]
-            radius: promień (w metrach) w którym punkty będą uśredniane
+            points: tablica numpy z punktami [x, y, z]
+            radius: promień w metrach do wyszukiwania skupisk w płaszczyźnie XY
         
         Returns:
-            Przetworzona chmura punktów z uśrednionymi skupiskami
+            Przetworzona chmura punktów z skorygowanymi wysokościami
         """
-        from sklearn.cluster import DBSCAN
+        from sklearn.neighbors import BallTree
+        import numpy as np
+        from scipy import stats
         
-        # Użyj tylko współrzędnych X i Y do klastrowania
-        xy_points = points[:, :2]
-        
-        # Znajdź klastry punktów używając DBSCAN
-        clustering = DBSCAN(eps=radius, min_samples=2).fit(xy_points)
-        labels = clustering.labels_
-        
-        # Przygotuj listę na przetworzone punkty
-        processed_points = []
-        
-        # Dla każdego klastra (włączając szum, oznaczony jako -1)
-        for label in range(-1, labels.max() + 1):
-            mask = (labels == label)
-            cluster_points = points[mask]
+        def analyze_cluster_heights(heights):
+            """
+            Analizuje wysokości w skupisku i usuwa wartości odstające.
+            Zwraca listę poprawnych wysokości i informacje o odrzuconych punktach.
+            """
+            # Oblicz podstawowe statystyki
+            q1 = np.percentile(heights, 25)
+            q3 = np.percentile(heights, 75)
+            iqr = q3 - q1
+            median = np.median(heights)
             
-            if label == -1 or len(cluster_points) == 1:
-                # Punkty oznaczone jako szum lub pojedyncze zachowaj bez zmian
-                processed_points.extend(cluster_points)
-            else:
-                # Uśrednij punkty w klastrze
-                mean_point = cluster_points.mean(axis=0)
-                processed_points.append(mean_point)
+            # Określ granice dla wartości odstających (1.5 * IQR)
+            lower_bound = q1 - 1.5 * iqr
+            upper_bound = q3 + 1.5 * iqr
+            
+            # Znajdź wartości mieszczące się w zakresie
+            valid_mask = (heights >= lower_bound) & (heights <= upper_bound)
+            valid_heights = heights[valid_mask]
+            outliers = heights[~valid_mask]
+            
+            return valid_heights, outliers, median
+
+        # Utwórz drzewo do szybkiego wyszukiwania sąsiadów w płaszczyźnie XY
+        tree = BallTree(points[:, :2])
+        processed_points = []
+        processed_indices = set()
+        
+        # Przetwórz każdy punkt
+        for i in range(len(points)):
+            if i in processed_indices:
+                continue
+            
+            # Znajdź wszystkie punkty w zadanym promieniu (tylko XY)
+            nearby_indices = tree.query_radius([points[i, :2]], r=radius)[0]
+            
+            if len(nearby_indices) > 0:
+                cluster_points = points[nearby_indices]
+                heights = cluster_points[:, 2]
+                
+                # Jeśli w skupisku jest więcej niż jeden punkt
+                if len(heights) > 1:
+                    # Analizuj wysokości i usuń wartości odstające
+                    valid_heights, outliers, median = analyze_cluster_heights(heights)
+                    
+                    # Jeśli znaleziono wartości odstające, wyświetl informacje
+                    if len(outliers) > 0:
+                        print(f"\nZnaleziono wartości odstające w skupisku:")
+                        print(f"Pozycja środka XY: ({cluster_points[:, 0].mean():.2f}, {cluster_points[:, 1].mean():.2f})")
+                        print(f"Wszystkie wysokości: {sorted(heights)}")
+                        print(f"Odrzucone wysokości: {sorted(outliers)}")
+                        print(f"Zaakceptowane wysokości: {sorted(valid_heights)}")
+                    
+                    # Oblicz końcową wysokość jako średnią z poprawnych wartości
+                    if len(valid_heights) > 0:
+                        final_height = np.mean(valid_heights)
+                    else:
+                        # Jeśli wszystkie punkty zostały uznane za odstające, użyj mediany
+                        final_height = median
+                        print("Uwaga: wszystkie punkty w skupisku zostały uznane za odstające")
+                        print(f"Użyto mediany: {median}")
+                    
+                    # Utwórz nowy punkt ze średnią pozycją XY i obliczoną wysokością
+                    new_point = np.array([
+                        cluster_points[:, 0].mean(),
+                        cluster_points[:, 1].mean(),
+                        final_height
+                    ])
+                    processed_points.append(new_point)
+                    
+                else:
+                    # Jeśli w skupisku jest tylko jeden punkt, zachowaj go bez zmian
+                    processed_points.append(cluster_points[0])
+                
+                # Oznacz przetworzone punkty
+                processed_indices.update(nearby_indices)
         
         return np.array(processed_points)
+
+    def create_kriging_model(self):
+        """
+        Tworzy i wizualizuje model terenu wykorzystując metodę krigingu.
+        Funkcja działa na przetworzonych (uśrednionych) punktach.
+        """
+        try:
+            if self.df is None:
+                self.statusBar.showMessage("No data loaded")
+                return
+                
+            # Konwersja do współrzędnych metrycznych
+            points = np.array([self.geo_to_metric(lat, lon, alt) for lat, lon, alt in 
+                            zip(self.df['Latitude'], self.df['Longitude'], self.df['Altitude'])])
+            
+            # Przetwarzanie punktów funkcją process_points
+            processed_points = self.process_points(points, radius=1.0)
+            print(f"Rozpoczynam kriging na {len(processed_points)} punktach...")
+            
+            # Przygotowanie danych do krigingu
+            x = processed_points[:, 0]
+            y = processed_points[:, 1]
+            z = processed_points[:, 2]
+            
+            # Parametry siatki interpolacji
+            grid_density = 100
+            gridx = np.linspace(x.min(), x.max(), grid_density)
+            gridy = np.linspace(y.min(), y.max(), grid_density)
+            
+            # Konfiguracja krigingu
+            ok = OrdinaryKriging(
+                x, y, z,
+                variogram_model='gaussian',
+                verbose=False,
+                enable_plotting=False,
+                nlags=20,
+                weight=True
+            )
+            
+            # Wykonanie interpolacji
+            z_interpolated, variance = ok.execute('grid', gridx, gridy)
+            
+            # Tworzenie siatki PyVista
+            x_mesh, y_mesh = np.meshgrid(gridx, gridy)
+            interpolated_grid = pv.StructuredGrid(x_mesh, y_mesh, z_interpolated)
+            
+             # Dodanie danych wysokościowych i wariancji do siatki
+            interpolated_grid.point_data['altitude'] = z_interpolated.flatten()  # Wysokości
+            interpolated_grid.point_data['variance'] = variance.flatten()  # Wariancja
+            
+            # Wizualizacja
+            self.frame.clear()
+            
+            # Dodaj interpolowaną powierzchnię
+            surface_actor = self.frame.add_mesh(
+                interpolated_grid,
+                scalars='altitude',
+                cmap='terrain',
+                show_edges=True,
+                edge_color='black',
+                line_width=1,
+                opacity=0.8,
+                scalar_bar_args={
+                    'title': 'Altitude [m]',
+                    'vertical': True,
+                    'position_x': 0.85,
+                    'position_y': 0.15,
+                    'n_labels': 5,
+                    'fmt': '%.1f',
+                    'width': 0.1
+                }
+            )
+            
+            # Dodaj punkty pomiarowe
+            point_cloud = pv.PolyData(processed_points)
+            point_cloud.point_data['altitude'] = processed_points[:, 2]  # Dodaj wysokości do punktów
+            self.frame.add_points(
+                point_cloud,
+                color='red',
+                point_size=5,
+                render_points_as_spheres=True,
+                opacity=0.8
+            )
+            
+            # Funkcja przełączania między wysokością a wariancją
+            def toggle_view(flag):
+                if flag:
+                    surface_actor.mapper.array_name = 'variance'
+                    surface_actor.mapper.lookup_table.cmap = 'viridis'
+                    self.frame.scalar_bar.SetTitle('Interpolation Variance')
+                else:
+                    surface_actor.mapper.array_name = 'z'
+                    surface_actor.mapper.lookup_table.cmap = 'terrain'
+                    self.frame.scalar_bar.SetTitle('Altitude [m]')
+                self.frame.render()
+            
+            # Dodaj przycisk przełączania widoku
+            self.frame.add_checkbox_button_widget(
+                toggle_view,
+                value=False,
+                size=30,
+                position=(10, 10),
+                color_on='green',
+                color_off='red',
+                background_color='white'
+            )
+            
+            # Dodaj tekst opisujący przycisk
+            self.frame.add_text(
+                'Toggle Height/Variance',
+                position=(50, 10),
+                font_size=9,
+                color='black',
+                shadow=True
+            )
+            
+            print("Kriging zakończony pomyślnie")
+            self.statusBar.showMessage("Kriging model created successfully")
+            
+        except Exception as e:
+            print(f"Błąd podczas tworzenia modelu krigingu: {str(e)}")
+            self.statusBar.showMessage(f"Error: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def analyze_point_distribution(self, points):
         """
@@ -496,7 +696,7 @@ class TerrainMapper(QMainWindow):
             self.frame.add_points(point_cloud, 
                                 color='darkred' if raw else 'darkblue', 
                                 point_size=5 if raw else 5,
-                                render_points_as_spheres=True)
+                                render_points_as_spheres=False)
             
             # Dodaj siatkę pomocniczą z rzeczywistymi wymiarami
             self.frame.show_grid(
@@ -666,9 +866,8 @@ class TerrainMapper(QMainWindow):
 
             # Dodaj punkty
             self.frame.add_points(point_cloud, 
-                                color='lightblue', 
-                                point_size=2,
-                                render_points_as_spheres=True)
+                                color='black', 
+                                point_size=2)
 
             # Generowanie iso-linii na wygładzonym modelu
             n_contours = 20
@@ -853,7 +1052,7 @@ class TerrainMapper(QMainWindow):
                         zip(self.df['Latitude'], self.df['Longitude'], self.df['Altitude'])])
         
         # Process points
-        processed_points = self.process_points(points, radius=1.0)
+        processed_points = self.process_points(points, radius=1.5)
         
         # Create and smooth surface
         self.create_smooth_surface(processed_points, smoothing_method, iterations, relaxation_factor)
@@ -893,7 +1092,7 @@ class TerrainMapper(QMainWindow):
                         zip(self.df['Latitude'], self.df['Longitude'], self.df['Altitude'])])
         
         # Process points
-        processed_points = self.process_points(points, radius=1.0)
+        processed_points = self.process_points(points, radius=1.5)
         
         # Create visualization
         self.create_visualization(processed_points)
@@ -906,6 +1105,7 @@ class TerrainMapper(QMainWindow):
         self.visualize_button_raw.setEnabled(enable_buttons)
         self.visualize_button.setEnabled(enable_buttons)
         self.visualize_button_interpolation.setEnabled(enable_buttons)
+        # self.visualize_button_kriging.setEnabled(enable_buttons)
         self.delete_button.setEnabled(enable_buttons)
 
     def delete_selected_sessions(self):

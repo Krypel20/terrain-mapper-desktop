@@ -12,3 +12,4 @@ paho-mqtt
 pyproj
 pyvistaqt
 psycopg2
+pykrige
