@@ -226,21 +226,21 @@ class TerrainMapper(QMainWindow):
         self.visualize_button_kriging = QPushButton("Create Kriging Model")
         self.visualize_button_kriging.clicked.connect(self.create_kriging_model)
         self.visualize_button_kriging.setEnabled(False)
-        self.visualize_button_kriging.setStyleSheet("""
-            QPushButton {
-                background-color: #2E8B57;
-                color: white;
-                padding: 5px;
-                border: none;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #3CB371;
-            }
-            QPushButton:disabled {
-                background-color: #cccccc;
-            }
-        """)
+        # self.visualize_button_kriging.setStyleSheet("""
+        #     QPushButton {
+        #         background-color: #2E8B57;
+        #         color: white;
+        #         padding: 5px;
+        #         border: none;
+        #         border-radius: 4px;
+        #     }
+        #     QPushButton:hover {
+        #         background-color: #3CB371;
+        #     }
+        #     QPushButton:disabled {
+        #         background-color: #cccccc;
+        #     }
+        # """)
         
         buttons_layout.addWidget(self.visualize_button_raw)
         buttons_layout.addWidget(self.visualize_button)
@@ -349,6 +349,7 @@ class TerrainMapper(QMainWindow):
             self.visualize_button_raw.setEnabled(True)
             self.visualize_button.setEnabled(True)
             self.visualize_button_interpolation.setEnabled(True)
+            # self.visualize_button_kriging.setEnabled(True)
 
     def geo_to_metric(self, lat, lon, alt):
         # Convert geographic coordinates (EPSG:4326) to metric (EPSG:3857)
@@ -396,7 +397,7 @@ class TerrainMapper(QMainWindow):
         
         return smoothed
  
-    def process_points(self, points, radius=3.0):
+    def process_points(self, points, radius=1.0):
         """
         Przetwarza punkty pomiarowe poprzez analizę skupisk i korektę wysokości.
         
@@ -492,51 +493,55 @@ class TerrainMapper(QMainWindow):
     def create_kriging_model(self):
         """
         Tworzy i wizualizuje model terenu wykorzystując metodę krigingu.
-        Funkcja działa na przetworzonych (uśrednionych) punktach.
+        Funkcja używa już przetworzonych punktów z poprzednich etapów.
         """
         try:
             if self.df is None:
-                self.statusBar.showMessage("No data loaded")
                 return
                 
             # Konwersja do współrzędnych metrycznych
             points = np.array([self.geo_to_metric(lat, lon, alt) for lat, lon, alt in 
                             zip(self.df['Latitude'], self.df['Longitude'], self.df['Altitude'])])
             
-            # Przetwarzanie punktów funkcją process_points
-            processed_points = self.process_points(points, radius=1.0)
-            print(f"Rozpoczynam kriging na {len(processed_points)} punktach...")
+            # Używamy już przetworzonych punktów
+            processed_points = self.process_points(points, radius=1.5)
             
             # Przygotowanie danych do krigingu
             x = processed_points[:, 0]
             y = processed_points[:, 1]
-            z = processed_points[:, 2]
+            z = processed_points[:, 2]  # Używamy oryginalnych wysokości
             
-            # Parametry siatki interpolacji
-            grid_density = 100
-            gridx = np.linspace(x.min(), x.max(), grid_density)
-            gridy = np.linspace(y.min(), y.max(), grid_density)
+            # Dostosowanie parametrów krigingu do skali danych
+            avg_xy_range = (np.ptp(x) + np.ptp(y)) / 2
+            variogram_range = avg_xy_range * 0.3
             
-            # Konfiguracja krigingu
             ok = OrdinaryKriging(
                 x, y, z,
                 variogram_model='gaussian',
+                variogram_parameters={
+                    'sill': np.var(z),
+                    'range': variogram_range,
+                    'nugget': np.var(z) * 0.01
+                },
                 verbose=False,
-                enable_plotting=False,
-                nlags=20,
-                weight=True
+                enable_plotting=False
             )
             
-            # Wykonanie interpolacji
+            # Zwiększamy gęstość siatki dla lepszej dokładności
+            grid_density = 200
+            gridx = np.linspace(x.min(), x.max(), grid_density)
+            gridy = np.linspace(y.min(), y.max(), grid_density)
+            
+            # Wykonanie krigingu
             z_interpolated, variance = ok.execute('grid', gridx, gridy)
             
             # Tworzenie siatki PyVista
             x_mesh, y_mesh = np.meshgrid(gridx, gridy)
             interpolated_grid = pv.StructuredGrid(x_mesh, y_mesh, z_interpolated)
             
-             # Dodanie danych wysokościowych i wariancji do siatki
-            interpolated_grid.point_data['altitude'] = z_interpolated.flatten()  # Wysokości
-            interpolated_grid.point_data['variance'] = variance.flatten()  # Wariancja
+            # Dodanie danych do siatki
+            interpolated_grid.point_data['altitude'] = z_interpolated.flatten()
+            interpolated_grid.point_data['variance'] = variance.flatten()
             
             # Wizualizacja
             self.frame.clear()
@@ -549,7 +554,7 @@ class TerrainMapper(QMainWindow):
                 show_edges=True,
                 edge_color='black',
                 line_width=1,
-                opacity=0.8,
+                opacity=1,
                 scalar_bar_args={
                     'title': 'Altitude [m]',
                     'vertical': True,
@@ -659,7 +664,7 @@ class TerrainMapper(QMainWindow):
             point_cloud = pv.PolyData(normalized_points)
             point_cloud['Altitude'] = points[:, 2]  # Oryginalne wysokości
 
-            # Tworzenie siatki
+            # Tworzenie siatki trójkątów
             grid = point_cloud.delaunay_2d()
 
             # Generowanie iso-linii na siatce
@@ -674,13 +679,36 @@ class TerrainMapper(QMainWindow):
             # Wizualizacja
             self.frame.clear()
             
+            # Przygotowanie siatki
+            grid.compute_normals(inplace=True)  # Oblicz normalne przed dodaniem siatki
+            
             # Dodaj siatkę
             self.frame.add_mesh(grid, 
-                            scalars='Altitude', 
-                            cmap="terrain", 
-                            show_edges=True if raw else False,
-                            edge_color='black',
-                            line_width=1)
+                  scalars='Altitude', 
+                  cmap="terrain", 
+                  show_edges=True if raw else False,
+                  edge_color='black',
+                  line_width=1,
+                  smooth_shading=True,
+                  specular=0.5,
+                  specular_power=15,
+                  diffuse=0.8,
+                  ambient=0.3,
+                  opacity=1.0,
+                  scalar_bar_args={
+                      'title': 'Wysokość [m]',
+                      'vertical': True,
+                      'position_x': 0.85,
+                      'position_y': 0.15,
+                      'n_labels': 5,
+                      'fmt': '%.1f',
+                      'width': 0.1,
+                      'font_family': 'arial',
+                      'bold': True,
+                      'shadow': True,
+                      'color': 'black',
+                      'background_color': 'white',
+                  })
             
             if not raw:
                 # Dodaj iso-linie
@@ -691,6 +719,15 @@ class TerrainMapper(QMainWindow):
                     render_lines_as_tubes=True,
                     opacity=0.7
                 )
+                
+                # Dodaj światła używając poprawnej składni
+                light1 = pv.Light(light_type='headlight')  # Światło z "przodu"
+                light1.intensity = 0.8
+                self.frame.add_light(light1)
+
+                light2 = pv.Light(position=[1, 1, 1], focal_point=[0, 0, 0])  # Światło boczne
+                light2.intensity = 0.4
+                self.frame.add_light(light2)
             
             # Dodaj punkty
             self.frame.add_points(point_cloud, 
@@ -846,7 +883,7 @@ class TerrainMapper(QMainWindow):
             mesh_actor = self.frame.add_mesh(
                 smoothed,
                 scalars='Altitude',
-                cmap='terrain',
+                cmap='viridis',
                 show_edges=False,
                 smooth_shading=True,
                 specular=0.3,
@@ -864,10 +901,39 @@ class TerrainMapper(QMainWindow):
                 }
             )
 
-            # Dodaj punkty
+            # Ustawienia oświetlenia dla lepszej wizualizacji terenu
+            # Główne światło sceny
+            main_light = pv.Light(light_type='scenelight')
+            main_light.intensity = 0.5
+            main_light.position = [0, 0, 1]
+            main_light.focal_point = [0, 0, 0]
+            self.frame.add_light(main_light)
+
+            main_light = pv.Light(light_type='headlight')
+            main_light.intensity = 0.7
+            self.frame.add_light(main_light)
+
+            # Dodanie punktów
             self.frame.add_points(point_cloud, 
                                 color='black', 
-                                point_size=2)
+                                point_size=3)
+
+            # Siatka pomocnicza
+            self.frame.show_grid(
+                grid=True,
+                location='outer',
+                all_edges=True,
+                xtitle='X [m]',
+                ytitle='Y [m]',
+                ztitle='Z [m]'
+            )
+            
+            # Referencje do oryginalnych kolormap
+            self.altitude_cmap = 'terrain'
+            self.slope_cmap = 'fire'
+            
+            # Zmienna do śledzenia aktualnego skalara
+            self.current_scalar = 'Altitude'
 
             # Generowanie iso-linii na wygładzonym modelu
             n_contours = 20
@@ -887,104 +953,36 @@ class TerrainMapper(QMainWindow):
                 opacity=0.7,
                 name='contours'  # nazwa do późniejszego usunięcia
             )
-
-            # Siatka pomocnicza
-            self.frame.show_grid(
-                grid=True,
-                location='outer',
-                all_edges=True,
-                xtitle='X [m]',
-                ytitle='Y [m]',
-                ztitle='Z [m]'
-            )
             
-            # Referencje do oryginalnych kolormap
-            self.altitude_cmap = 'terrain'
-            self.slope_cmap = 'fire'
-            
-            # Zmienna do śledzenia aktualnego skalara
-            self.current_scalar = 'Altitude'
-
-            # Poprawiona funkcja przełączająca skalar
+            # Dodaj przycisk przełączania między widokiem wysokości a nachylenia
             def toggle_scalar(flag):
-                try:
-                    # Usuń stare iso-linie
-                    self.frame.remove_actor('contours')
+                if flag:
+                    mesh_actor.mapper.array_name = 'Slope'
+                    mesh_actor.mapper.scalar_range = [0, 25]
+                    mesh_actor.mapper.lookup_table.cmap = 'viridis'
+                    self.frame.scalar_bar.SetTitle('Nachylenie [%]')
+                else:
+                    mesh_actor.mapper.array_name = 'Altitude'
+                    mesh_actor.mapper.scalar_range = [smoothed.points[:, 2].min(), 
+                                                    smoothed.points[:, 2].max()]
+                    mesh_actor.mapper.lookup_table.cmap = 'terrain'
+                    self.frame.scalar_bar.SetTitle('Wysokość [m]')
+                self.frame.render()
 
-                    if self.current_scalar == 'Altitude':
-                        # Przełącz na nachylenie
-                        mesh_actor.mapper.array_name = 'Slope'
-                        mesh_actor.mapper.scalar_range = [slope_magnitude.min(), slope_magnitude.max()]
-                        mesh_actor.mapper.lookup_table.cmap = 'viridis'
-                        self.frame.scalar_bar.SetTitle('Slope [%]')
-                        self.current_scalar = 'Slope'
-
-                        # Generuj iso-linie dla nachylenia
-                        contours = smoothed.contour(isovalues=np.linspace(
-                            smoothed_points[:, 2].min(),
-                            smoothed_points[:, 2].max(),
-                            20
-                        ))
-                        self.frame.add_mesh(
-                            contours, 
-                            color="white", 
-                            line_width=2,
-                            render_lines_as_tubes=True,
-                            opacity=0.7,
-                            name='contours'  # nazwa do późniejszego usunięcia
-                        )
-                    else:
-                        # Przełącz na wysokość
-                        mesh_actor.mapper.array_name = 'Altitude'
-                        mesh_actor.mapper.scalar_range = [smoothed_points[:, 2].min(), smoothed_points[:, 2].max()]
-                        mesh_actor.mapper.lookup_table.cmap = 'magma'
-                        self.frame.scalar_bar.SetTitle('Altitude [m]')
-                        self.current_scalar = 'Altitude'
-
-                        # Generuj iso-linie dla wysokości
-                        slope_contour_values = np.linspace(
-                            slope_magnitude.min(),
-                            slope_magnitude.max(),
-                            15
-                        )
-                        slope_contours = smoothed.contour(
-                            slope_contour_values,
-                            scalars='Slope'
-                        )
-                        self.frame.add_mesh(
-                            slope_contours,
-                            color="black",
-                            line_width=2,
-                            render_lines_as_tubes=True,
-                            opacity=0.5,
-                            name='contours'
-                        )
-
-                    # Aktualizacja widoku
-                    self.frame.render()
-                    
-                    # Aktualizuj pasek statusu
-                    self.statusBar.showMessage(f"Displaying: {self.current_scalar}")
-                    
-                except Exception as e:
-                    print(f"Error in toggle_scalar: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-
-            # Dodaj przycisk przełączający z etykietą
+            # Dodaj przycisk przełączania
             self.frame.add_checkbox_button_widget(
                 toggle_scalar,
-                value=False,
+                value=True,  # Domyślnie pokazuj nachylenie
                 size=30,
                 position=(10, 10),
                 color_on='green',
                 color_off='red',
-                background_color='black'
+                background_color='white'
             )
 
             # Dodaj tekst opisujący przycisk
             self.frame.add_text(
-                'Toggle Height/Slope',
+                'Przełącz Nachylenie/Wysokość',
                 position=(50, 10),
                 font_size=9,
                 color='black',
@@ -993,18 +991,18 @@ class TerrainMapper(QMainWindow):
 
             # Przygotuj statystyki
             stats = {
-                'Points': len(smoothed_points),
-                'Area width': f"{width:.1f}m",
-                'Area length': f"{length:.1f}m",
-                'Min altitude': f"{float(points[:, 2].min()):.2f}m",
-                'Max altitude': f"{float(points[:, 2].max()):.2f}m",
-                'Height range': f"{height:.2f}m",
-                'Area': f"{(width * length):.1f}m²",
-                'Max slope': f"{float(slope_magnitude.max()):.1f}%",
-                'Mean slope': f"{float(slope_magnitude.mean()):.1f}%",
-                'Smoothing': smoothing_method,
-                'Iterations': iterations,
-                'Factor': relaxation_factor
+                'Punkty': len(smoothed_points),
+                'Szerokość': f"{width:.1f}m",
+                'Długość obszaru': f"{length:.1f}m",
+                'Min wysokość': f"{float(points[:, 2].min()):.2f}m",
+                'Max wysokość': f"{float(points[:, 2].max()):.2f}m",
+                'Zmiana wysokości': f"{height:.2f}m",
+                'Obszar': f"{(width * length):.1f}m²",
+                'Max nachylenie': f"{float(slope_magnitude.max()):.1f}%",
+                'Średnie nachylenie': f"{float(slope_magnitude.mean()):.1f}%",
+                'Metoda wygładaznia': smoothing_method,
+                'Liczba iteracji': iterations,
+                'Współczynnik': relaxation_factor
             }
             
             # Zaktualizowany format wyświetlania statystyk
@@ -1029,6 +1027,62 @@ class TerrainMapper(QMainWindow):
             self.statusBar.showMessage(f"Error: {str(e)}")
             import traceback
             traceback.print_exc()
+
+    def analyze_slope(self, smoothed, point):
+        """
+        Analizuje nachylenie w konkretnym punkcie modelu
+        
+        Args:
+            smoothed: Model terenu (PyVista DataSet)
+            point: Punkt [x, y] dla którego chcemy znaleźć nachylenie
+        """
+        # Znajdź najbliższy punkt w modelu
+        closest_point = smoothed.find_closest_point(point)
+        cell_id = smoothed.find_closest_cell(point)
+        
+        # Pobierz nachylenie w tym punkcie
+        terrain_slope = smoothed.compute_derivative(scalars='Altitude')
+        gradient = terrain_slope['gradient'][cell_id]
+        
+        # Oblicz nachylenie w procentach
+        slope_percent = np.sqrt(gradient[0]**2 + gradient[1]**2) * 100
+        
+        # Oblicz kierunek nachylenia (azymut)
+        slope_direction = np.degrees(np.arctan2(gradient[1], gradient[0]))
+        if slope_direction < 0:
+            slope_direction += 360
+            
+        return {
+            'point': point,
+            'slope_percent': slope_percent,
+            'slope_direction': slope_direction,
+            'elevation': smoothed.points[closest_point][2]
+        }
+
+    def analyze_slope_area(self, smoothed, min_x, max_x, min_y, max_y):
+        """
+        Analizuje nachylenie w wybranym obszarze
+        """
+        # Znajdź wszystkie punkty w zadanym obszarze
+        mask = ((smoothed.points[:, 0] >= min_x) & 
+                (smoothed.points[:, 0] <= max_x) & 
+                (smoothed.points[:, 1] >= min_y) & 
+                (smoothed.points[:, 1] <= max_y))
+        
+        points_in_area = smoothed.points[mask]
+        
+        terrain_slope = smoothed.compute_derivative(scalars='Altitude')
+        gradients = terrain_slope['gradient'][mask]
+        
+        slopes = np.sqrt(gradients[:, 0]**2 + gradients[:, 1]**2) * 100
+        
+        return {
+            'mean_slope': np.mean(slopes),
+            'max_slope': np.max(slopes),
+            'min_slope': np.min(slopes),
+            'std_slope': np.std(slopes),
+            'points_analyzed': len(points_in_area)
+        }
 
     def visualize_terrain_interpolation(self):
         """Visualize interpolated surface from merged sessions."""
@@ -1105,7 +1159,7 @@ class TerrainMapper(QMainWindow):
         self.visualize_button_raw.setEnabled(enable_buttons)
         self.visualize_button.setEnabled(enable_buttons)
         self.visualize_button_interpolation.setEnabled(enable_buttons)
-        # self.visualize_button_kriging.setEnabled(enable_buttons)
+        self.visualize_button_kriging.setEnabled(enable_buttons)
         self.delete_button.setEnabled(enable_buttons)
 
     def delete_selected_sessions(self):

@@ -1,3 +1,2 @@
 
-from PyQt6.QtGui import QAction, QIcon
-from pyvistaqt import QtInteractor
+            smoothed.point_data['Slope'] = slope_magnitude
