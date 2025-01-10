@@ -75,7 +75,7 @@ class TerrainMapper(QMainWindow):
             user="pkrypel",
             password="20122002",
             host="localhost",
-            port="5433" #5433 // 5434 - Desktop // Laptop
+            port="5434" #5433 // 5434 - Desktop // Laptop
         )
         # słownik do przechowywania ładowanych danych sesji
         self.session_data = {}
@@ -454,7 +454,7 @@ class TerrainMapper(QMainWindow):
                     geolocator = Nominatim(user_agent="terrain_mapper_app")
                     location = geolocator.reverse(f"{lat},{lon}")
                     address = location.raw['address']
-                    town = address.get('town', '') or address.get('village', '')
+                    town = address.get('town', '') or address.get('village', '') or address.get('city', '')
                     
                     # Zwróć nazwę lokalizacji wraz z koordynatami
                     return f"{town} ({lat:.3f}, {lon:.3f})"

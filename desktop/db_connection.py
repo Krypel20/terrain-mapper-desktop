@@ -61,39 +61,44 @@ class DatabaseConnection:
         conn = self.connect()
         cur = conn.cursor()
 
-        query = """
-        WITH groups AS (
-            SELECT 
-                m1.session_name,
-                m1.area_centroid,
-                MIN(m1.start_time) as group_time,
-                ARRAY_AGG(m2.session_name ORDER BY m2.start_time DESC) as group_sessions
-            FROM measurement_sessions m1
-            JOIN measurement_sessions m2 ON ST_DWithin(
-                m1.area_centroid::geography, 
-                m2.area_centroid::geography,
+        # Pobierz wszystkie sesje
+        cur.execute("SELECT session_name, area_centroid FROM measurement_sessions WHERE area_centroid IS NOT NULL ORDER BY start_time DESC")
+        all_sessions = cur.fetchall()
+        
+        groups = []
+        used_sessions = set()
+        
+        for session_name, centroid in all_sessions:
+            # Pomiń jeśli sesja jest już w jakiejś grupie
+            if session_name in used_sessions:
+                continue
+                
+            # Znajdź pobliskie sesje
+            query = """
+            SELECT session_name
+            FROM measurement_sessions
+            WHERE ST_DWithin(
+                area_centroid::geography, 
+                %s::geography,
                 1000  -- 1km w metrach
             )
-            WHERE m1.area_centroid IS NOT NULL 
-            AND m2.area_centroid IS NOT NULL
-            GROUP BY m1.session_name, m1.area_centroid
-        )
-        SELECT group_sessions, MIN(group_time) as min_time
-        FROM groups
-        GROUP BY group_sessions
-        ORDER BY min_time DESC;
-        """
+            AND area_centroid IS NOT NULL
+            ORDER BY start_time DESC;
+            """
+            
+            cur.execute(query, [centroid])
+            nearby_sessions = [row[0] for row in cur.fetchall()]
+            
+            # Utwórz nową grupę tylko z sesjami, które nie są jeszcze użyte
+            new_group = [s for s in nearby_sessions if s not in used_sessions]
+            
+            if new_group:  # Jeśli grupa nie jest pusta
+                groups.append(new_group)
+                used_sessions.update(new_group)
         
-        try:
-            cur.execute(query)
-            groups = [group[0] for group in cur.fetchall()]
-            return groups
-        except Exception as e:
-            print(f"Error in get_session_groups: {e}")
-            return []
-        finally:
-            cur.close()
-    
+        cur.close()
+        return groups
+
     def delete_session(self, session_name):
         conn = self.connect()
         cur = conn.cursor()
