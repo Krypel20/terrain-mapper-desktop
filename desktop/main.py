@@ -12,11 +12,36 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QMessageBox
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtGui import QAction, QColor, QIcon
 from pyvistaqt import QtInteractor
 from db_connection import DatabaseConnection
 from pykrige.ok import OrdinaryKriging
+from geopy.geocoders import Nominatim
+from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtWidgets import QProgressDialog
 
+class LoadSessionsThread(QThread):
+    finished = pyqtSignal(object)
+    
+    def __init__(self, db, view_mode):
+        super().__init__()
+        self.db = db
+        self.view_mode = view_mode
+        
+    def run(self):
+        try:
+            if self.view_mode == 'By Date':
+                # Pobierz prostą listę sesji
+                sessions = self.db.get_sessions()
+                self.finished.emit({'mode': 'date', 'data': sessions})
+            else:
+                # Pobierz pogrupowane sesje
+                groups = self.db.get_session_groups()
+                self.finished.emit({'mode': 'location', 'data': groups})
+        except Exception as e:
+            print(f"Error loading sessions: {e}")
+            self.finished.emit(None)
+            
 class SessionListWidget(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -25,7 +50,18 @@ class SessionListWidget(QListWidget):
     def addSessionItem(self, session_name, measurements_count):
         item = QListWidgetItem(f"{session_name} ({measurements_count} points)")
         item.setData(Qt.ItemDataRole.UserRole, session_name)
+        # Nie ustawiamy tu żadnych kolorów - zostawiamy domyślne
         self.addItem(item)
+        return item
+
+    def addSeparator(self, group_name):
+        separator = QListWidgetItem(group_name)
+        separator.setFlags(separator.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        separator.setBackground(QColor(80, 80, 80))  # Ciemniejszy szary dla separatora
+        font = separator.font()
+        font.setBold(True)
+        separator.setFont(font)
+        self.addItem(separator)
 
 class TerrainMapper(QMainWindow):
     def __init__(self):
@@ -141,6 +177,18 @@ class TerrainMapper(QMainWindow):
         # Buttons layout
         buttons_layout = QHBoxLayout()
         
+        # Dodaj przełącznik widoku przed listą sesji
+        view_layout = QHBoxLayout()
+        view_label = QLabel("View Mode:")
+        self.view_mode = QComboBox()
+        self.view_mode.addItems(['By Date', 'By Location'])
+        self.view_mode.currentTextChanged.connect(self.load_sessions)
+        
+        view_layout.addWidget(view_label)
+        view_layout.addWidget(self.view_mode)
+        
+        session_layout.insertLayout(0, view_layout)  # Dodaj na początku layoutu sesji
+        
         # Add refresh button
         self.load_button = QPushButton("Refresh Sessions")
         self.load_button.clicked.connect(self.load_sessions)
@@ -226,26 +274,26 @@ class TerrainMapper(QMainWindow):
         self.visualize_button_kriging = QPushButton("Create Kriging Model")
         self.visualize_button_kriging.clicked.connect(self.create_kriging_model)
         self.visualize_button_kriging.setEnabled(False)
-        # self.visualize_button_kriging.setStyleSheet("""
-        #     QPushButton {
-        #         background-color: #2E8B57;
-        #         color: white;
-        #         padding: 5px;
-        #         border: none;
-        #         border-radius: 4px;
-        #     }
-        #     QPushButton:hover {
-        #         background-color: #3CB371;
-        #     }
-        #     QPushButton:disabled {
-        #         background-color: #cccccc;
-        #     }
-        # """)
+        self.visualize_button_kriging.setStyleSheet("""
+            QPushButton {
+                background-color: #2E8B57;
+                color: white;
+                padding: 5px;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #3CB371;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+            }
+        """)
         
         buttons_layout.addWidget(self.visualize_button_raw)
         buttons_layout.addWidget(self.visualize_button)
         buttons_layout.addWidget(self.visualize_button_interpolation)
-        buttons_layout.addWidget(self.visualize_button_kriging)
+        # buttons_layout.addWidget(self.visualize_button_kriging)
         buttons_group.setLayout(buttons_layout)
         
         # Add all groups to main layout
@@ -255,7 +303,7 @@ class TerrainMapper(QMainWindow):
         control_layout.addStretch()
         
         # Styling
-        control_widget.setMaximumWidth(300)
+        control_widget.setMaximumWidth(350)
         control_widget.setStyleSheet("""
             QGroupBox {
                 font-weight: bold;
@@ -327,20 +375,55 @@ class TerrainMapper(QMainWindow):
 
     def load_sessions(self):
         """Load sessions from database and populate the session list."""
+        progress = QProgressDialog("Loading sessions...", None, 0, 0, self)
+        progress.setWindowTitle("Please wait")
+        progress.setModal(True)
+        progress.setCancelButton(None)
+        progress.show()
+        
+        # Utwórz i uruchom wątek ładowania
+        self.load_thread = LoadSessionsThread(self.db, self.view_mode.currentText())
+        self.load_thread.finished.connect(lambda data: self._update_session_list(data, progress))
+        self.load_thread.start()
+            
+    def _update_session_list(self, data, progress):
+        """Update session list based on selected view mode."""
+        if not data:
+            progress.close()
+            return
+            
         self.session_list.clear()
         self.session_data.clear()
         
-        sessions = self.db.get_sessions()
-        for session_name in sessions:
-            # Get the data for this session
-            df = self.db.get_session_data(session_name)
-            measurements_count = len(df) if df is not None else 0
-            
-            # Add to session list widget
-            self.session_list.addSessionItem(session_name, measurements_count)
-            
-            # Store the data
-            self.session_data[session_name] = df
+        if data['mode'] == 'date':
+            # Wyświetl sesje chronologicznie
+            for session_name in data['data']:
+                df = self.db.get_session_data(session_name)
+                measurements_count = len(df) if df is not None else 0
+                self.session_list.addSessionItem(session_name, measurements_count)
+                self.session_data[session_name] = df
+        else:
+            # Wyświetl sesje pogrupowane według lokalizacji
+            for group_index, group in enumerate(data['data']):
+                if not group:
+                    continue
+                    
+                if group_index > 0:
+                    spacer = QListWidgetItem("")
+                    spacer.setFlags(spacer.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+                    self.session_list.addItem(spacer)
+                
+                group_coords = self._get_location_group_name(group[0])
+                group_name = f"Group {group_index + 1} - {group_coords}"
+                self.session_list.addSeparator(group_name)
+                
+                for session_name in group:
+                    df = self.db.get_session_data(session_name)
+                    measurements_count = len(df) if df is not None else 0
+                    self.session_list.addSessionItem(session_name, measurements_count)
+                    self.session_data[session_name] = df
+        
+        progress.close()
 
     def load_session_data(self):
         session_name = self.session_combo.currentText()
@@ -350,6 +433,34 @@ class TerrainMapper(QMainWindow):
             self.visualize_button.setEnabled(True)
             self.visualize_button_interpolation.setEnabled(True)
             # self.visualize_button_kriging.setEnabled(True)
+
+    def _get_location_group_name(self, session_name):
+        """Generates the group name based on the session's location."""
+        query = """
+        SELECT 
+            ST_Y(area_centroid::geometry) as lat,
+            ST_X(area_centroid::geometry) as lon
+        FROM measurement_sessions 
+        WHERE session_name = %s
+        """
+        
+        try:
+            with self.db.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(query, [session_name])
+                    lat, lon = cur.fetchone()
+                    
+                    # Użyj geopy do uzyskania nazwy lokalizacji
+                    geolocator = Nominatim(user_agent="terrain_mapper_app")
+                    location = geolocator.reverse(f"{lat},{lon}")
+                    address = location.raw['address']
+                    town = address.get('town', '') or address.get('village', '')
+                    
+                    # Zwróć nazwę lokalizacji wraz z koordynatami
+                    return f"{town} ({lat:.3f}, {lon:.3f})"
+        except Exception as e:
+            print(f"Error getting location name: {e}")
+            return f"{lat:.4f}°N, {lon:.4f}°E"  # Fallback do samych koordynatów
 
     def geo_to_metric(self, lat, lon, alt):
         # Convert geographic coordinates (EPSG:4326) to metric (EPSG:3857)
@@ -720,13 +831,13 @@ class TerrainMapper(QMainWindow):
                     opacity=0.7
                 )
                 
-                # Dodaj światła używając poprawnej składni
+                # Dodaj światła
                 light1 = pv.Light(light_type='headlight')  # Światło z "przodu"
                 light1.intensity = 0.8
                 self.frame.add_light(light1)
 
                 light2 = pv.Light(position=[1, 1, 1], focal_point=[0, 0, 0])  # Światło boczne
-                light2.intensity = 0.4
+                light2.intensity = 0.6
                 self.frame.add_light(light2)
             
             # Dodaj punkty
@@ -735,6 +846,10 @@ class TerrainMapper(QMainWindow):
                                 point_size=5 if raw else 5,
                                 render_points_as_spheres=False)
             
+            # Oblicz zakres wartości Z
+            z_min = int(points[:, 2].min())
+            z_max = int(points[:, 2].max())
+
             # Dodaj siatkę pomocniczą z rzeczywistymi wymiarami
             self.frame.show_grid(
                 grid=True,
@@ -742,32 +857,32 @@ class TerrainMapper(QMainWindow):
                 all_edges=True,
                 xtitle='X [m]',
                 ytitle='Y [m]',
-                ztitle='Z [m]'
+                ztitle='Z [m]',
+                font_size=12,
+                padding=0.2,
+                fmt='%d',
+                bounds=[-width/2, width/2,      # zakres X
+                        -length/2, length/2,     # zakres Y
+                        z_min, z_max]           # zakres Z
             )
+
             self.frame.show_axes()
-            
-            # Statystyki z rzeczywistymi wymiarami
+
+            # Przygotuj i wyświetl statystyki
             stats = {
                 'Points': len(points),
-                'Area width': f"{width:.1f}m",
-                'Area length': f"{length:.1f}m",
-                'Min altitude': f"{float(points[:, 2].min()):.2f}m",
-                'Max altitude': f"{float(points[:, 2].max()):.2f}m",
-                'height difference': f"{height:.2f}m",
+                'Width': f"{width:.1f}m",
+                'Length': f"{length:.1f}m",
+                'Min altitude': f"{int(points[:, 2].min())}m",
+                'Max altitude': f"{int(points[:, 2].max())}m",
+                'Height difference': f"{int(height)}m",
                 'Area': f"{(width * length):.1f}m²",
-                'Type': 'Raw' if raw else 'Processed'
+                'Type': 'Raw' if raw else 'Processed'  # Dodajemy informację o typie
             }
-            
-            stats_text = '\n'.join([
-                f"{k}: {v}" for k, v in stats.items()
-            ])
-            self.frame.add_text(
-                stats_text,
-                position='upper_left',
-                font_size=11,
-                shadow=False
-            )
-            
+
+            stats_text = '\n'.join([f"{k}: {v}" for k, v in stats.items()])
+            self.frame.add_text(stats_text, position='upper_left', font_size=11, shadow=False)
+
             self.statusBar.showMessage(f"Visualization created: {stats['Type']} point cloud")
             
         except Exception as e:
@@ -918,6 +1033,10 @@ class TerrainMapper(QMainWindow):
                                 color='black', 
                                 point_size=3)
 
+            # Oblicz zakres wartości Z
+            # z_min = int(points[:, 2].min())
+            # z_max = int(points[:, 2].max())
+            
             # Siatka pomocnicza
             self.frame.show_grid(
                 grid=True,
@@ -925,7 +1044,13 @@ class TerrainMapper(QMainWindow):
                 all_edges=True,
                 xtitle='X [m]',
                 ytitle='Y [m]',
-                ztitle='Z [m]'
+                ztitle='Z [m]',
+                font_size=12,
+                padding=0.2,
+                fmt='%d',
+                # bounds=[-width/2, width/2,      # zakres X
+                #         -length/2, length/2,     # zakres Y
+                #         z_min, z_max]           # zakres Z
             )
             
             # Referencje do oryginalnych kolormap
@@ -1155,6 +1280,14 @@ class TerrainMapper(QMainWindow):
         """Enable/disable buttons based on selection."""
         selected_items = self.session_list.selectedItems()
         enable_buttons = len(selected_items) > 0
+        
+        # Ustaw kolor tła dla wybranych elementów
+        for i in range(self.session_list.count()):
+            item = self.session_list.item(i)
+            if item in selected_items:
+                item.setBackground(QColor(255, 192, 255))  # Jasnoróżowe tło dla zaznaczonych
+            else:
+                item.setBackground(QColor(48, 48, 48))  # Przywróć domyślny kolor
         
         self.visualize_button_raw.setEnabled(enable_buttons)
         self.visualize_button.setEnabled(enable_buttons)
