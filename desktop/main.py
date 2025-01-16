@@ -75,7 +75,7 @@ class TerrainMapper(QMainWindow):
             user="pkrypel",
             password="20122002",
             host="localhost",
-            port="5434" #5433 // 5434 - Desktop // Laptop
+            port="5433" #5433 // 5434 - Desktop // Laptop
         )
         # słownik do przechowywania ładowanych danych sesji
         self.session_data = {}
@@ -113,9 +113,28 @@ class TerrainMapper(QMainWindow):
         # Inicjalizacja zmiennych
         self.df = None
         self.grid = None
+        self.points_actor = None
+        self.normalized_cloud = None
         
         # Załaduj sesje
         self.load_sessions()
+        
+    def toggle_points(self, flag):
+        """Metoda do przełączania widoczności punktów pomiarowych."""
+        if flag and self.normalized_cloud is not None:
+            # Dodaj punkty używając znormalizowanej chmury
+            self._points_actor = self.frame.add_mesh(
+                self.normalized_cloud,
+                color='crimson',
+                point_size=4,
+                render_points_as_spheres=False,
+            )
+        else:
+            # Usuń punkty jeśli istnieją
+            if self._points_actor is not None:
+                self.frame.remove_actor(self._points_actor)
+                self._points_actor = None
+        self.frame.render()
 
     def create_menu_bar(self):
         menubar = self.menuBar()
@@ -157,10 +176,17 @@ class TerrainMapper(QMainWindow):
         toolbar = QToolBar()
         self.addToolBar(toolbar)
         
-        # Przyciski na pasku narzędzi
+        # Przyciski odświerzania
         refresh_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload), "Refresh", self)
         refresh_action.triggered.connect(self.load_sessions)
         toolbar.addAction(refresh_action)
+        
+        toolbar.addSeparator()
+        
+        # Przycisk eksportu
+        export_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton), "Export Model", self)
+        export_action.triggered.connect(self.export_model)
+        toolbar.addAction(export_action)
 
     def create_control_panel(self):
         control_widget = QWidget()
@@ -232,7 +258,7 @@ class TerrainMapper(QMainWindow):
         # Add other parameters (smoothing, etc.)
         smoothing_label = QLabel("Smoothing:")
         self.smoothing_method = QComboBox()
-        self.smoothing_method.addItems(['laplacian', 'gaussian', 'window'])
+        self.smoothing_method.addItems(['laplacian', 'gaussian'])
         
         iterations_label = QLabel("Iterations:")
         self.smoothing_iterations = QSpinBox()
@@ -272,7 +298,6 @@ class TerrainMapper(QMainWindow):
         self.visualize_button_interpolation.setEnabled(False)
         
         self.visualize_button_kriging = QPushButton("Create Kriging Model")
-        self.visualize_button_kriging.clicked.connect(self.create_kriging_model)
         self.visualize_button_kriging.setEnabled(False)
         self.visualize_button_kriging.setStyleSheet("""
             QPushButton {
@@ -293,7 +318,7 @@ class TerrainMapper(QMainWindow):
         buttons_layout.addWidget(self.visualize_button_raw)
         buttons_layout.addWidget(self.visualize_button)
         buttons_layout.addWidget(self.visualize_button_interpolation)
-        # buttons_layout.addWidget(self.visualize_button_kriging)
+       #buttons_layout.addWidget(self.visualize_button_kriging)
         buttons_group.setLayout(buttons_layout)
         
         # Add all groups to main layout
@@ -353,28 +378,38 @@ class TerrainMapper(QMainWindow):
         return visualization_widget
         
     def export_model(self):
-        # Implementacja eksportu modelu
-        if self.grid is not None:
-            file_name, _ = QFileDialog.getSaveFileName(
-                self,
-                "Export Model",
-                "",
-                "STL Files (*.stl);;VTK Files (*.vtk);;All Files (*.*)"
-            )
-            if file_name:
-                try:
-                    if file_name.endswith('.stl'):
-                        self.grid.save(file_name)
-                    elif file_name.endswith('.vtk'):
-                        self.grid.save(file_name)
-                    self.statusBar.showMessage(f"Model exported to {file_name}")
-                except Exception as e:
-                    self.statusBar.showMessage(f"Error exporting model: {str(e)}")
-        else:
-            self.statusBar.showMessage("No model to export")
+        """Eksportuje aktualnie wyświetlany model do wybranego formatu."""
+        if not hasattr(self, 'grid') or self.grid is None:
+            self.statusBar.showMessage("No model to export. Create a visualization first.")
+            return
+            
+        file_name, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Model",
+            "",
+            "STL Files (*.stl);;VTK Files (*.vtk);;OBJ Files (*.obj)"
+        )
+        
+        if not file_name:
+            return
+            
+        try:
+            # Eksport w zależności od formatu
+            if file_name.endswith('.stl'):
+                self.grid.save(file_name, binary=True)
+            elif file_name.endswith('.vtk'):
+                self.grid.save(file_name)
+            elif file_name.endswith('.obj'):
+                self.grid.save(file_name)
+                
+            self.statusBar.showMessage(f"Model successfully exported to {file_name}")
+            
+        except Exception as e:
+            self.statusBar.showMessage(f"Error exporting model: {str(e)}")
+            print(f"Export error details: {str(e)}")
 
     def load_sessions(self):
-        """Load sessions from database and populate the session list."""
+        """Załadowanie sesji z bazy danych."""
         progress = QProgressDialog("Loading sessions...", None, 0, 0, self)
         progress.setWindowTitle("Please wait")
         progress.setModal(True)
@@ -492,19 +527,6 @@ class TerrainMapper(QMainWindow):
                 n_iter=iterations,
                 progress_bar=True
             )
-            
-        elif method == 'window':
-            smoothed = surf.copy()
-            points = smoothed.points
-            
-            for _ in range(iterations):
-                tree = KDTree(points[:, :2])
-                
-                for i in range(len(points)):
-                    neighbors = tree.query_ball_point(points[i, :2], r=2.0)
-                    if neighbors:
-                        weights = np.exp(-np.sum((points[neighbors, :2] - points[i, :2])**2, axis=1))
-                        smoothed.points[i, 2] = np.average(points[neighbors, 2], weights=weights)
         
         return smoothed
  
@@ -601,134 +623,6 @@ class TerrainMapper(QMainWindow):
         
         return np.array(processed_points)
 
-    def create_kriging_model(self):
-        """
-        Tworzy i wizualizuje model terenu wykorzystując metodę krigingu.
-        Funkcja używa już przetworzonych punktów z poprzednich etapów.
-        """
-        try:
-            if self.df is None:
-                return
-                
-            # Konwersja do współrzędnych metrycznych
-            points = np.array([self.geo_to_metric(lat, lon, alt) for lat, lon, alt in 
-                            zip(self.df['Latitude'], self.df['Longitude'], self.df['Altitude'])])
-            
-            # Używamy już przetworzonych punktów
-            processed_points = self.process_points(points, radius=1.5)
-            
-            # Przygotowanie danych do krigingu
-            x = processed_points[:, 0]
-            y = processed_points[:, 1]
-            z = processed_points[:, 2]  # Używamy oryginalnych wysokości
-            
-            # Dostosowanie parametrów krigingu do skali danych
-            avg_xy_range = (np.ptp(x) + np.ptp(y)) / 2
-            variogram_range = avg_xy_range * 0.3
-            
-            ok = OrdinaryKriging(
-                x, y, z,
-                variogram_model='gaussian',
-                variogram_parameters={
-                    'sill': np.var(z),
-                    'range': variogram_range,
-                    'nugget': np.var(z) * 0.01
-                },
-                verbose=False,
-                enable_plotting=False
-            )
-            
-            # Zwiększamy gęstość siatki dla lepszej dokładności
-            grid_density = 200
-            gridx = np.linspace(x.min(), x.max(), grid_density)
-            gridy = np.linspace(y.min(), y.max(), grid_density)
-            
-            # Wykonanie krigingu
-            z_interpolated, variance = ok.execute('grid', gridx, gridy)
-            
-            # Tworzenie siatki PyVista
-            x_mesh, y_mesh = np.meshgrid(gridx, gridy)
-            interpolated_grid = pv.StructuredGrid(x_mesh, y_mesh, z_interpolated)
-            
-            # Dodanie danych do siatki
-            interpolated_grid.point_data['altitude'] = z_interpolated.flatten()
-            interpolated_grid.point_data['variance'] = variance.flatten()
-            
-            # Wizualizacja
-            self.frame.clear()
-            
-            # Dodaj interpolowaną powierzchnię
-            surface_actor = self.frame.add_mesh(
-                interpolated_grid,
-                scalars='altitude',
-                cmap='terrain',
-                show_edges=True,
-                edge_color='black',
-                line_width=1,
-                opacity=1,
-                scalar_bar_args={
-                    'title': 'Altitude [m]',
-                    'vertical': True,
-                    'position_x': 0.85,
-                    'position_y': 0.15,
-                    'n_labels': 5,
-                    'fmt': '%.1f',
-                    'width': 0.1
-                }
-            )
-            
-            # Dodaj punkty pomiarowe
-            point_cloud = pv.PolyData(processed_points)
-            point_cloud.point_data['altitude'] = processed_points[:, 2]  # Dodaj wysokości do punktów
-            self.frame.add_points(
-                point_cloud,
-                color='red',
-                point_size=5,
-                render_points_as_spheres=True,
-                opacity=0.8
-            )
-            
-            # Funkcja przełączania między wysokością a wariancją
-            def toggle_view(flag):
-                if flag:
-                    surface_actor.mapper.array_name = 'variance'
-                    surface_actor.mapper.lookup_table.cmap = 'viridis'
-                    self.frame.scalar_bar.SetTitle('Interpolation Variance')
-                else:
-                    surface_actor.mapper.array_name = 'z'
-                    surface_actor.mapper.lookup_table.cmap = 'terrain'
-                    self.frame.scalar_bar.SetTitle('Altitude [m]')
-                self.frame.render()
-            
-            # Dodaj przycisk przełączania widoku
-            self.frame.add_checkbox_button_widget(
-                toggle_view,
-                value=False,
-                size=30,
-                position=(10, 10),
-                color_on='green',
-                color_off='red',
-                background_color='white'
-            )
-            
-            # Dodaj tekst opisujący przycisk
-            self.frame.add_text(
-                'Toggle Height/Variance',
-                position=(50, 10),
-                font_size=9,
-                color='black',
-                shadow=True
-            )
-            
-            print("Kriging zakończony pomyślnie")
-            self.statusBar.showMessage("Kriging model created successfully")
-            
-        except Exception as e:
-            print(f"Błąd podczas tworzenia modelu krigingu: {str(e)}")
-            self.statusBar.showMessage(f"Error: {str(e)}")
-            import traceback
-            traceback.print_exc()
-
     def analyze_point_distribution(self, points):
         """
         Analizuje rozkład punktów i wyświetla statystyki.
@@ -779,7 +673,7 @@ class TerrainMapper(QMainWindow):
             grid = point_cloud.delaunay_2d()
 
             # Generowanie iso-linii na siatce
-            n_contours = 15  # liczba linii poziomicowych
+            n_contours = 10 # liczba linii poziomicowych
             contour_values = np.linspace(
                 points[:, 2].min(), 
                 points[:, 2].max(), 
@@ -823,13 +717,13 @@ class TerrainMapper(QMainWindow):
             
             if not raw:
                 # Dodaj iso-linie
-                self.frame.add_mesh(
-                    contours, 
-                    color="black", 
-                    line_width=2,
-                    render_lines_as_tubes=True,
-                    opacity=0.7
-                )
+                # self.frame.add_mesh(
+                #     contours, 
+                #     color="black", 
+                #     line_width=2,
+                #     render_lines_as_tubes=True,
+                #     opacity=0.7
+                # )
                 
                 # Dodaj światła
                 light1 = pv.Light(light_type='headlight')  # Światło z "przodu"
@@ -937,38 +831,37 @@ class TerrainMapper(QMainWindow):
                 )
             elif smoothing_method == 'gaussian':
                 smoothed = surf.copy()
-                pts = smoothed.points
-                sigma = relaxation_factor
+                points = smoothed.points.copy()
+                
+                # Oblicz średnią odległość między punktami
+                tree = KDTree(points[:, :2])
+                # Znajdź 2 najbliższych sąsiadów dla każdego punktu (pierwszy to sam punkt)
+                distances = []
+                for i in range(min(100, len(points))):
+                    dist = tree.query(points[i, :2].reshape(1, -1), k=2)[0]
+                    if len(dist[0]) > 1:
+                        distances.append(dist[0][1])
+                
+                mean_distance = np.mean(distances) if distances else 1.0
+                sigma = mean_distance * relaxation_factor
                 
                 for _ in range(iterations):
-                    tree = KDTree(pts[:, :2])
-                    new_points = pts.copy()
-                    radius = 3 * sigma
+                    new_points = points.copy()
+                    search_radius = 3.0 * sigma
                     
-                    for i in range(len(pts)):
-                        neighbors = tree.query_ball_point(pts[i, :2], r=radius)
-                        if neighbors:
-                            distances = np.sum((pts[neighbors, :2] - pts[i, :2])**2, axis=1)
-                            weights = np.exp(-distances / (2 * sigma**2))
+                    for i in range(len(points)):
+                        neighbors_idx = tree.query_ball_point(points[i, :2], r=search_radius)
+                        
+                        if len(neighbors_idx) > 1:
+                            diff = points[neighbors_idx, :2] - points[i, :2]
+                            dist_sq = np.sum(diff * diff, axis=1)
+                            weights = np.exp(-0.5 * dist_sq / (sigma * sigma))
                             weights = weights / np.sum(weights)
-                            new_points[i, 2] = np.sum(weights * pts[neighbors, 2])
+                            new_points[i, 2] = np.sum(weights * points[neighbors_idx, 2])
                     
-                    pts = new_points
-                    smoothed.points = pts
-                    
-            elif smoothing_method == 'window':
-                smoothed = surf.copy()
-                pts = smoothed.points
+                    points = new_points.copy()
                 
-                for _ in range(iterations):
-                    tree = KDTree(pts[:, :2])
-                    radius = 2.0 * relaxation_factor
-                    
-                    for i in range(len(pts)):
-                        neighbors = tree.query_ball_point(pts[i, :2], r=radius)
-                        if neighbors:
-                            weights = np.exp(-np.sum((pts[neighbors, :2] - pts[i, :2])**2, axis=1))
-                            smoothed.points[i, 2] = np.average(pts[neighbors, 2], weights=weights)
+                smoothed.points = points
 
             # Sprawdź czy wygładzanie się powiodło
             if smoothed is None:
@@ -980,23 +873,86 @@ class TerrainMapper(QMainWindow):
             # Aktualizacja wartości wysokości po wygładzeniu
             smoothed.point_data['Altitude'] = smoothed_points[:, 2]
             
-            # Obliczenie nachylenia terenu
-            terrain_slope = smoothed.compute_derivative(scalars='Altitude')
+            # Przygotuj statystyki
+            stats = {
+                'Punkty': len(smoothed_points),
+                'Szerokość obszaru': f"{width:.1f}m",
+                'Długość obszaru': f"{length:.1f}m",
+                'Min wysokość': f"{float(points[:, 2].min()):.2f}m",
+                'Max wysokość': f"{float(points[:, 2].max()):.2f}m",
+                'Zmiana wysokości': f"{height:.2f}m",
+                'Obszar': f"{(width * length):.1f}m²",
+                #'Średnie nachylenie': f"{average_slope:.1f}%",
+                'Metoda wygładaznia': smoothing_method,
+                'Liczba iteracji': iterations,
+                'Współczynnik': relaxation_factor
+            }
             
-            # Obliczanie nachylenie terenu modelu w procentach
-            # Obliczenie kąta w radianach używając arctangensa gradientu
-            # Konwersja na procenty: tan(kąt) * 100
-            gradient_x = terrain_slope['gradient'][:, 0]
-            gradient_y = terrain_slope['gradient'][:, 1]
-            slope_magnitude = np.sqrt(gradient_x**2 + gradient_y**2) * 100  # konwersja na procenty
-            smoothed.point_data['Slope'] = slope_magnitude
+            # Oblicz zakres wysokości dla głębokości bloku
+            z_min = points[:, 2].min()
+            
+            # Wykonaj ekstruzję wygładzonej powierzchni
+            extruded = smoothed.extrude([0, 0, -1], capping=True)
+            
+             # Pobierz liczbę punktów w oryginalnej powierzchni
+            n_original = len(smoothed.points)
+            
+            # Ustaw wszystkie dolne punkty na tę samą wysokość z_min
+            points_extruded = extruded.points
+            for i in range(n_original, len(points_extruded)):
+                points_extruded[i][2] = z_min
+            
+            extruded.points = points_extruded
+            
+            # Stwórz tablicę kolorowania tylko dla górnej powierzchni
+            altitude_colors = np.ones(len(extruded.points)) * z_min
+            altitude_colors[:n_original] = smoothed.point_data['Altitude']
+            extruded.point_data['Altitude'] = altitude_colors
 
-            # Wizualizacja
+            # Zapisz siatkę do późniejszego eksportu
+            self.grid = extruded
+            
+                        # Znajdź punkty na granicy górnej powierzchni
+            boundary_edges = smoothed.extract_feature_edges(
+                boundary_edges=True,
+                non_manifold_edges=False,
+                feature_edges=False,
+                manifold_edges=False
+            )
+            
+            # Stwórz linie pionowe łączące górną i dolną powierzchnię
+            boundary_points = boundary_edges.points
+            n_points = len(boundary_points)
+
+            # Przygotuj punkty i linie
+            vertical_points = []
+            vertical_lines = []
+            point_id = 0
+            
+            for point in boundary_points:
+                # Dodaj górny punkt
+                vertical_points.append(point.copy())
+                # Dodaj dolny punkt
+                bottom_point = point.copy()
+                bottom_point[2] = z_min
+                vertical_points.append(bottom_point)
+                
+                # Dodaj definicję linii (2 punkty)
+                vertical_lines.append([2, point_id, point_id + 1])
+                point_id += 2
+                
+            # Stwórz obiekt PolyData z poprawną strukturą linii
+            vertical_edges = pv.PolyData(
+                np.array(vertical_points),
+                np.array(vertical_lines)
+            )
+
+            # Wizualizacja terenu
             self.frame.clear()
 
-            # Dodaj wygładzoną powierzchnię z zaktualizowaną teksturą
+            # Dodaj wygładzoną powierzchnię ze zaktualizowaną teksturą
             mesh_actor = self.frame.add_mesh(
-                smoothed,
+                extruded,
                 scalars='Altitude',
                 cmap='viridis',
                 show_edges=False,
@@ -1016,6 +972,9 @@ class TerrainMapper(QMainWindow):
                 }
             )
 
+            self.frame.add_mesh(boundary_edges, color='black', line_width=2)
+            self.frame.add_mesh(vertical_edges, color='black', line_width=2)
+            
             # Ustawienia oświetlenia dla lepszej wizualizacji terenu
             # Główne światło sceny
             main_light = pv.Light(light_type='scenelight')
@@ -1025,17 +984,12 @@ class TerrainMapper(QMainWindow):
             self.frame.add_light(main_light)
 
             main_light = pv.Light(light_type='headlight')
-            main_light.intensity = 0.7
+            main_light.intensity = 0.3
             self.frame.add_light(main_light)
-
-            # Dodanie punktów
-            self.frame.add_points(point_cloud, 
-                                color='black', 
-                                point_size=3)
-
-            # Oblicz zakres wartości Z
-            # z_min = int(points[:, 2].min())
-            # z_max = int(points[:, 2].max())
+            
+            main_light = pv.Light(light_type='cameralight')
+            main_light.intensity = 0.85
+            self.frame.add_light(main_light)
             
             # Siatka pomocnicza
             self.frame.show_grid(
@@ -1048,9 +1002,6 @@ class TerrainMapper(QMainWindow):
                 font_size=12,
                 padding=0.2,
                 fmt='%d',
-                # bounds=[-width/2, width/2,      # zakres X
-                #         -length/2, length/2,     # zakres Y
-                #         z_min, z_max]           # zakres Z
             )
             
             # Referencje do oryginalnych kolormap
@@ -1061,7 +1012,7 @@ class TerrainMapper(QMainWindow):
             self.current_scalar = 'Altitude'
 
             # Generowanie iso-linii na wygładzonym modelu
-            n_contours = 20
+            n_contours = 15
             contour_values = np.linspace(
                 smoothed_points[:, 2].min(),
                 smoothed_points[:, 2].max(),
@@ -1079,27 +1030,15 @@ class TerrainMapper(QMainWindow):
                 name='contours'  # nazwa do późniejszego usunięcia
             )
             
-            # Dodaj przycisk przełączania między widokiem wysokości a nachylenia
-            def toggle_scalar(flag):
-                if flag:
-                    mesh_actor.mapper.array_name = 'Slope'
-                    mesh_actor.mapper.scalar_range = [0, 25]
-                    mesh_actor.mapper.lookup_table.cmap = 'viridis'
-                    self.frame.scalar_bar.SetTitle('Nachylenie [%]')
-                else:
-                    mesh_actor.mapper.array_name = 'Altitude'
-                    mesh_actor.mapper.scalar_range = [smoothed.points[:, 2].min(), 
-                                                    smoothed.points[:, 2].max()]
-                    mesh_actor.mapper.lookup_table.cmap = 'terrain'
-                    self.frame.scalar_bar.SetTitle('Wysokość [m]')
-                self.frame.render()
+            ## Zapisz znormalizowaną chmurę punktów
+            self.normalized_cloud = point_cloud
 
-            # Dodaj przycisk przełączania
+            # Dodaj przycisk przełączania punktów
             self.frame.add_checkbox_button_widget(
-                toggle_scalar,
-                value=True,  # Domyślnie pokazuj nachylenie
+                self.toggle_points,  # Używamy metody klasy
+                value=False,
                 size=30,
-                position=(10, 10),
+                position=(10, 25),
                 color_on='green',
                 color_off='red',
                 background_color='white'
@@ -1107,28 +1046,12 @@ class TerrainMapper(QMainWindow):
 
             # Dodaj tekst opisujący przycisk
             self.frame.add_text(
-                'Przełącz Nachylenie/Wysokość',
-                position=(50, 10),
+                'Pokaż punkty pomiarowe',
+                position=(50, 25),  # Dopasuj pozycję do przycisku
                 font_size=9,
                 color='black',
                 shadow=True
             )
-
-            # Przygotuj statystyki
-            stats = {
-                'Punkty': len(smoothed_points),
-                'Szerokość': f"{width:.1f}m",
-                'Długość obszaru': f"{length:.1f}m",
-                'Min wysokość': f"{float(points[:, 2].min()):.2f}m",
-                'Max wysokość': f"{float(points[:, 2].max()):.2f}m",
-                'Zmiana wysokości': f"{height:.2f}m",
-                'Obszar': f"{(width * length):.1f}m²",
-                'Max nachylenie': f"{float(slope_magnitude.max()):.1f}%",
-                'Średnie nachylenie': f"{float(slope_magnitude.mean()):.1f}%",
-                'Metoda wygładaznia': smoothing_method,
-                'Liczba iteracji': iterations,
-                'Współczynnik': relaxation_factor
-            }
             
             # Zaktualizowany format wyświetlania statystyk
             stats_text = '\n'.join([
@@ -1233,7 +1156,7 @@ class TerrainMapper(QMainWindow):
         # Process points
         processed_points = self.process_points(points, radius=1.5)
         
-        # Create and smooth surface
+        # Stworzenie wygładzonego modelu powierzchni
         self.create_smooth_surface(processed_points, smoothing_method, iterations, relaxation_factor)
 
     def visualize_terrain_raw(self):
@@ -1292,7 +1215,7 @@ class TerrainMapper(QMainWindow):
         self.visualize_button_raw.setEnabled(enable_buttons)
         self.visualize_button.setEnabled(enable_buttons)
         self.visualize_button_interpolation.setEnabled(enable_buttons)
-        self.visualize_button_kriging.setEnabled(enable_buttons)
+        #self.visualize_button_kriging.setEnabled(enable_buttons)
         self.delete_button.setEnabled(enable_buttons)
 
     def delete_selected_sessions(self):

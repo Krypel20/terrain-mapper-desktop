@@ -100,13 +100,19 @@ class DatabaseConnection:
         return groups
 
     def delete_session(self, session_name):
-        conn = self.connect()
-        cur = conn.cursor()
-        table_name = f"session_{session_name.lower().replace(' ', '_')}"
-        cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(table_name)))
-        cur.execute(sql.SQL("DELETE FROM measurement_sessions WHERE session_name = %s"), (session_name,))
-        conn.commit()
-        cur.close()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                try:
+                    cur.execute("BEGIN")
+                    table_name = f"session_{session_name.lower()}"
+                    cur.execute(sql.SQL("DROP TABLE IF EXISTS {}")
+                        .format(sql.Identifier(table_name)))
+                    cur.execute("DELETE FROM measurement_sessions WHERE session_name = %s", 
+                        (session_name,))
+                    cur.execute("COMMIT")
+                except:
+                    cur.execute("ROLLBACK")
+                    raise
 
     def __enter__(self):
         self.connect()
