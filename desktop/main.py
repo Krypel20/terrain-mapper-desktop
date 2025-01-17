@@ -79,6 +79,8 @@ class TerrainMapper(QMainWindow):
         )
         # słownik do przechowywania ładowanych danych sesji
         self.session_data = {}
+        self.clicked_points = []  # Lista punktów
+        self.point_labels = []   # Lista etykiet
 
         # Stwórz pasek menu
         self.create_menu_bar()
@@ -503,6 +505,58 @@ class TerrainMapper(QMainWindow):
         x, y = transformer.transform(lon, lat)
         z = alt
         return x, y, z
+
+    def point_clicked(self, point):
+        """Obsługa kliknięcia na punkt w modelu."""
+        if point is not None:
+            # Pobierz wysokość w klikniętym punkcie
+            height = point[2]
+            message = f"Wysokość: {height:.2f}m"
+            
+            # Stwórz i dodaj sferę
+            sphere = pv.Sphere(radius=0.5, center=point)
+            marker = self.frame.add_mesh(sphere, color='red')
+            self.clicked_points.append(marker)
+        
+            # Stwórz przesunięty punkt dla etykiety
+            label_point = np.array(point)
+            label_point[2] += 2  # Przesuń etykietę o 2 jednostki w górę
+            
+            # Dodaj etykietę w przesuniętej pozycji
+            label = self.frame.add_point_labels(
+                points=[label_point],
+                labels=[message],
+                font_size=11,
+                shape='rounded_rect',
+                shape_opacity=0.8,
+                point_size=0,
+                always_visible=True,
+                text_color='black',
+                render_points_as_spheres=False,
+                shape_color='white',
+                margin=5
+            )
+            self.point_labels.append(label)
+            
+            # Ogranicz liczbę punktów (opcjonalne)
+            max_points = 5
+            if len(self.clicked_points) > max_points:
+                # Usuń najstarszy punkt i etykietę
+                old_point = self.clicked_points.pop(0)
+                old_label = self.point_labels.pop(0)
+                self.frame.remove_actor(old_point)
+                self.frame.remove_actor(old_label)
+            
+            self.frame.render()
+    
+    def clear_points(self):
+        """Czyści wszystkie punkty i etykiety."""
+        for point in self.clicked_points:
+            self.frame.remove_actor(point)
+        for label in self.point_labels:
+            self.frame.remove_actor(label)
+        self.clicked_points = []
+        self.point_labels = []
     
     def smooth_terrain(self, grid, method='laplacian', iterations=1, relaxation_factor=0.5):
         """
@@ -792,7 +846,11 @@ class TerrainMapper(QMainWindow):
             print(f"Method: {smoothing_method}")
             print(f"Iterations: {iterations}")
             print(f"Smoothing factor: {relaxation_factor}")
-
+            
+            if hasattr(self, 'frame'):
+                self.frame.disable_picking()
+                self.clear_points()
+                
             # Oblicz wymiary obszaru
             x_min, y_min = points[:, 0].min(), points[:, 1].min()
             x_max, y_max = points[:, 0].max(), points[:, 1].max()
@@ -885,7 +943,7 @@ class TerrainMapper(QMainWindow):
                 #'Średnie nachylenie': f"{average_slope:.1f}%",
                 'Metoda wygładaznia': smoothing_method,
                 'Liczba iteracji': iterations,
-                'Współczynnik': relaxation_factor
+                'Współczynnik': round(relaxation_factor, 1)
             }
             
             # Oblicz zakres wysokości dla głębokości bloku
@@ -1004,15 +1062,22 @@ class TerrainMapper(QMainWindow):
                 fmt='%d',
             )
             
-            # Referencje do oryginalnych kolormap
-            self.altitude_cmap = 'terrain'
-            self.slope_cmap = 'fire'
+            # Dodaj obsługę kliknięć
+            def callback(pos):
+                self.point_clicked(pos)
             
-            # Zmienna do śledzenia aktualnego skalara
-            self.current_scalar = 'Altitude'
+            self.frame.enable_point_picking(callback=callback, show_message=False)
+            
+            self.frame.add_text(
+                'Kliknij RPM na powierzchni aby zobaczyć wysokość',
+                position='lower_right',  # Używamy predefiniowanej pozycji
+                font_size=9,
+                color='black',
+                shadow=True
+            )
 
             # Generowanie iso-linii na wygładzonym modelu
-            n_contours = 15
+            n_contours = round(height)
             contour_values = np.linspace(
                 smoothed_points[:, 2].min(),
                 smoothed_points[:, 2].max(),
@@ -1134,6 +1199,8 @@ class TerrainMapper(QMainWindow):
 
     def visualize_terrain_interpolation(self):
         """Visualize interpolated surface from merged sessions."""
+        if hasattr(self, 'frame'):
+            self.frame.disable_picking()
         if self.df is None:
             self.df = self.merge_session_data()
             
