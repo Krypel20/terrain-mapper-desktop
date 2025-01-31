@@ -818,20 +818,19 @@ class TerrainMapper(QMainWindow):
 
             # Przygotuj i wyświetl statystyki
             stats = {
-                'Points': len(points),
-                'Width': f"{width:.1f}m",
-                'Length': f"{length:.1f}m",
-                'Min altitude': f"{int(points[:, 2].min())}m",
-                'Max altitude': f"{int(points[:, 2].max())}m",
-                'Height difference': f"{int(height)}m",
-                'Area': f"{(width * length):.1f}m²",
-                'Type': 'Raw' if raw else 'Processed'  # Dodajemy informację o typie
+                'Punkty': len(points),
+                'Szerokość obszaru': f"{width:.1f}m",
+                'Długość obszaru': f"{length:.1f}m",
+                'Min wysokość': f"{float(points[:, 2].min()):.2f}m",
+                'Max wysokość': f"{float(points[:, 2].max()):.2f}m",
+                'Zmiana wysokości': f"{height:.2f}m",
+                'Obszar': f"{((width * length)/2):.1f}m²",
+                'Typ': 'Surowe pomiary' if raw else 'Przetworzone pomiary'
             }
 
             stats_text = '\n'.join([f"{k}: {v}" for k, v in stats.items()])
             self.frame.add_text(stats_text, position='upper_left', font_size=11, shadow=False)
-
-            self.statusBar.showMessage(f"Visualization created: {stats['Type']} point cloud")
+            self.statusBar.showMessage(f"Visualization created: {stats['Typ']} point cloud")
             
         except Exception as e:
             print(f"Error in visualization: {str(e)}")
@@ -873,6 +872,7 @@ class TerrainMapper(QMainWindow):
 
             # Tworzenie początkowej siatki
             surf = point_cloud.delaunay_2d()
+            surf.compute_normals(inplace=True)
             
             # Zainicjuj zmienną smoothed przed warunkami
             smoothed = None
@@ -939,7 +939,7 @@ class TerrainMapper(QMainWindow):
                 'Min wysokość': f"{float(points[:, 2].min()):.2f}m",
                 'Max wysokość': f"{float(points[:, 2].max()):.2f}m",
                 'Zmiana wysokości': f"{height:.2f}m",
-                'Obszar': f"{(width * length):.1f}m²",
+                'Obszar': f"{((width*length)/2):.1f}m²",
                 #'Średnie nachylenie': f"{average_slope:.1f}%",
                 'Metoda wygładaznia': smoothing_method,
                 'Liczba iteracji': iterations,
@@ -969,8 +969,8 @@ class TerrainMapper(QMainWindow):
 
             # Zapisz siatkę do późniejszego eksportu
             self.grid = extruded
-            
-                        # Znajdź punkty na granicy górnej powierzchni
+
+            # Znajdź punkty na granicy górnej powierzchni
             boundary_edges = smoothed.extract_feature_edges(
                 boundary_edges=True,
                 non_manifold_edges=False,
