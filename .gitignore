@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+tempCodeRunnerFile*
+
+# Local config / secrets
+.env
+
+# Local data, DB dumps and exported models
+*.sql.bak
+db_*.sql
+export/
+*.stl
+!examples/*.stl
+measurements/
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Local working files kept out of the public repo
+/_local/

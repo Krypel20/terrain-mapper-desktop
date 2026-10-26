@@ -15,7 +15,6 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QColor, QIcon
 from pyvistaqt import QtInteractor
 from db_connection import DatabaseConnection
-from pykrige.ok import OrdinaryKriging
 from geopy.geocoders import Nominatim
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import QProgressDialog
@@ -69,14 +68,8 @@ class TerrainMapper(QMainWindow):
         self.setWindowTitle("Terrain Mapper")
         self.setGeometry(100, 100, 1200, 800)
         
-        # Inicjalizacja bazy danych
-        self.db = DatabaseConnection(
-            dbname="terrain_measurements",
-            user="pkrypel",
-            password="20122002",
-            host="localhost",
-            port="5433" #5433 // 5434 - Desktop // Laptop
-        )
+        # Inicjalizacja bazy danych (parametry ze zmiennych środowiskowych TM_DB_*)
+        self.db = DatabaseConnection()
         # słownik do przechowywania ładowanych danych sesji
         self.session_data = {}
         self.clicked_points = []  # Lista punktów
@@ -505,6 +498,14 @@ class TerrainMapper(QMainWindow):
         x, y = transformer.transform(lon, lat)
         z = alt
         return x, y, z
+
+    @staticmethod
+    def metric_to_geo_df(points):
+        """Convert metric points (EPSG:3857) back to a Latitude/Longitude/Altitude DataFrame."""
+        points = np.asarray(points, dtype=float)
+        transformer = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+        lon, lat = transformer.transform(points[:, 0], points[:, 1])
+        return pd.DataFrame({'Latitude': lat, 'Longitude': lon, 'Altitude': points[:, 2]})
 
     def point_clicked(self, point):
         """Obsługa kliknięcia na punkt w modelu."""
@@ -1375,13 +1376,7 @@ class TerrainMapper(QMainWindow):
                 processed_points.append(mean_point)
                 processed_indices.update(nearby_indices)
         
-        result_df = pd.DataFrame({
-            'Latitude': [p[0] for p in processed_points],
-            'Longitude': [p[1] for p in processed_points],
-            'Altitude': [p[2] for p in processed_points]
-        })
-        
-        return result_df
+        return self.metric_to_geo_df(processed_points)
     
     def weighted_average_points(self, df, radius=1.0):
         """Average points with weights based on measurement quality."""
@@ -1413,13 +1408,7 @@ class TerrainMapper(QMainWindow):
                 processed_points.append(weighted_mean)
                 processed_indices.update(nearby_indices)
         
-        result_df = pd.DataFrame({
-            'Latitude': [p[0] for p in processed_points],
-            'Longitude': [p[1] for p in processed_points],
-            'Altitude': [p[2] for p in processed_points]
-        })
-        
-        return result_df
+        return self.metric_to_geo_df(processed_points)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

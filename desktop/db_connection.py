@@ -1,15 +1,24 @@
 # db_connection.py
+import os
+
 import psycopg2
 from psycopg2 import sql
 import pandas as pd
 
 class DatabaseConnection:
-    def __init__(self, dbname, user='postgres', password=None, host='localhost', port=5433):
-        self.dbname = dbname
-        self.user = user
-        self.password = password
-        self.host = host
-        self.port = port
+    """PostgreSQL/PostGIS access layer.
+
+    Connection parameters fall back to environment variables
+    (TM_DB_NAME, TM_DB_USER, TM_DB_PASSWORD, TM_DB_HOST, TM_DB_PORT),
+    so no credentials are stored in the source code.
+    """
+
+    def __init__(self, dbname=None, user=None, password=None, host=None, port=None):
+        self.dbname = dbname or os.getenv('TM_DB_NAME', 'terrain_measurements')
+        self.user = user or os.getenv('TM_DB_USER', 'postgres')
+        self.password = password or os.getenv('TM_DB_PASSWORD')
+        self.host = host or os.getenv('TM_DB_HOST', 'localhost')
+        self.port = port or int(os.getenv('TM_DB_PORT', '5432'))
         self.conn = None
 
     def connect(self):
@@ -41,8 +50,8 @@ class DatabaseConnection:
         query = sql.SQL("""
             SELECT measurement_time, 
                 ST_X(location::geometry) as longitude, 
-                ST_Y(location::geometry) as latitude, 
-                altitude 
+                ST_Y(location::geometry) as latitude,
+                altitude::double precision as altitude
             FROM {}
         """)
         
@@ -110,6 +119,7 @@ class DatabaseConnection:
                     cur.execute("DELETE FROM measurement_sessions WHERE session_name = %s", 
                         (session_name,))
                     cur.execute("COMMIT")
+                    return True
                 except:
                     cur.execute("ROLLBACK")
                     raise
