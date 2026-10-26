@@ -1,4 +1,4 @@
-# terrain-mapper-web
+# terrain-mapper-desktop
 
 Desktop application that turns low-cost GNSS measurements into interactive 3D terrain models. It reads measurement sessions from a PostgreSQL/PostGIS database, cleans the point cloud, builds a smoothed surface model and exports it to STL/OBJ/VTK.
 
@@ -63,8 +63,8 @@ The full schema is in [`sql/schema.sql`](sql/schema.sql).
 Requirements: Python 3.10+, PostgreSQL with the PostGIS extension. The app was developed on Windows 10/11; the commands below use PowerShell.
 
 ```powershell
-git clone https://github.com/Krypel20/terrain-mapper-web.git
-cd terrain-mapper-web
+git clone https://github.com/Krypel20/terrain-mapper-desktop.git
+cd terrain-mapper-desktop
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
@@ -77,7 +77,7 @@ createdb -U postgres terrain_measurements
 psql -U postgres -d terrain_measurements -f sql/schema.sql
 
 $env:TM_DB_USER = "postgres"
-$env:TM_DB_PASSWORD = "<your password>"
+$env:TM_DB_PASSWORD = "admin"
 $env:TM_DB_PORT = "5432"
 ```
 

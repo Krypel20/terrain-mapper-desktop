@@ -16,7 +16,7 @@ class DatabaseConnection:
     def __init__(self, dbname=None, user=None, password=None, host=None, port=None):
         self.dbname = dbname or os.getenv('TM_DB_NAME', 'terrain_measurements')
         self.user = user or os.getenv('TM_DB_USER', 'postgres')
-        self.password = password or os.getenv('TM_DB_PASSWORD')
+        self.password = password or os.getenv('TM_DB_PASSWORD', 'admin')
         self.host = host or os.getenv('TM_DB_HOST', 'localhost')
         self.port = port or int(os.getenv('TM_DB_PORT', '5432'))
         self.conn = None
