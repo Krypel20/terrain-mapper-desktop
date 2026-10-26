@@ -53,10 +53,10 @@ measurement_sessions
 
 session_<DDMMYY_HHMMSS>                     -- one table per session
   id, measurement_time, location GEOGRAPHY(POINT, 4326), altitude NUMERIC(10,2)
-  [vdop, baro_alt]                          -- added in later device versions
+  [vdop, baro_alt]                          -- later device versions (vdop holds HDOP)
 ```
 
-The full schema is in [`sql/schema.sql`](sql/schema.sql).
+The full schema is in [`sql/schema.sql`](sql/schema.sql). Sessions uploaded by device versions that did not store `area_centroid` can be fixed with [`sql/backfill_centroids.sql`](sql/backfill_centroids.sql); without a centroid they are visible only in the *By Date* view.
 
 ## Getting started
 
@@ -98,7 +98,7 @@ Select a session on the left and use **Visualize Raw Point Cloud**, **Visualize 
 │   └── db_connection.py   # PostgreSQL/PostGIS access (sessions, grouping, deletion)
 ├── scripts/
 │   └── import_csv.py      # load a measurement CSV without the device
-├── sql/schema.sql         # database schema
+├── sql/                   # database schema, centroid backfill
 ├── data/sample_data.csv   # sample measurement session
 ├── examples/              # exported STL model
 └── docs/img/              # screenshots used in this README
